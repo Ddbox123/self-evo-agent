@@ -574,7 +574,7 @@ def is_binary_content(content: str, threshold: float = 0.30) -> bool:
         return False
     
     # 统计可打印字符和空白字符
-    text_chars = set(bytes(range(32, 127)) + [9, 10, 13])  # tab, newline, cr
+    text_chars = set(bytes(range(32, 127)) + bytes([9, 10, 13]))  # tab, newline, cr
     
     non_text = sum(1 for byte in content.encode('utf-8', errors='ignore') 
                    if byte not in text_chars)

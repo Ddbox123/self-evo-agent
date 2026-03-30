@@ -1,0 +1,80 @@
+# Self-Evolving Agent 配置文件
+# 所有参数都在此文件中配置，无需使用环境变量
+
+# ============================================================
+# 大语言模型配置 (阿里云百炼)
+# ============================================================
+[llm]
+# 提供商：aliyun, openai, anthropic, deepseek 等
+provider = "aliyun"
+# 模型名称（阿里云百炼模型列表: https://help.aliyun.com/model-studio/getting-started/models）
+# 推荐: qwen-plus, qwen-turbo, qwen-max, qwen-coder-plus
+model_name = "qwen-plus"
+# API Key（直接从阿里云百炼控制台获取）
+api_key = "sk-50d93a5673154076b3f1a19bd58e7e4f"
+# API 端点（阿里云百炼专用）
+api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# 温度参数 (0.0-2.0)
+temperature = 0.7
+# 最大输出 tokens
+max_tokens = 4096
+# API 超时时间（秒）
+api_timeout = 60
+
+# ============================================================
+# Agent 行为配置
+# ============================================================
+[agent]
+# Agent 名称
+name = "SelfEvolvingAgent"
+# 苏醒间隔（秒）- Agent 每隔多久苏醒一次进行思考
+awake_interval = 60
+# 单次苏醒的最大工具调用次数
+max_iterations = 100
+# 最大运行时间（秒），0 表示无限制
+max_runtime = 0
+# 是否自动备份
+auto_backup = true
+# 自动备份间隔（秒）
+backup_interval = 300
+# 自动重启阈值，0 表示不自动重启
+auto_restart_threshold = 0
+
+# ============================================================
+# 工具配置
+# ============================================================
+[tools]
+# 是否启用网络搜索
+web_search_enabled = true
+# 是否启用文件编辑
+file_edit_enabled = true
+# 是否启用语法检查
+syntax_check_enabled = true
+# 是否允许自我重启
+restart_enabled = true
+
+# ============================================================
+# 日志配置
+# ============================================================
+[log]
+# 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
+level = "INFO"
+# 日志格式
+format = "%(asctime)s | %(levelname)-8s | %(message)s"
+# 日期格式
+date_format = "%Y-%m-%d %H:%M:%S"
+# 是否写入文件
+file_enabled = false
+# 日志文件路径
+file_path = "logs/agent.log"
+
+# ============================================================
+# 网络配置
+# ============================================================
+[network]
+# 请求超时（秒）
+timeout = 30
+# 最大重试次数
+max_retries = 3
+# User-Agent
+user_agent = "Mozilla/5.0 (compatible; SelfEvolvingAgent/1.0)"

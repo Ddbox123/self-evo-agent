@@ -14,6 +14,11 @@
 - Agent 运行主逻辑循环
 - 需要重启时，通过脱离父进程的方式唤起 restarter.py
 - Agent 自我了结后，restarter.py 等待原进程死亡，重新拉起新 Agent 进程
+
+配置说明：
+- 所有配置参数统一存放在 config.py 中
+- 支持从 config.toml 文件、环境变量、命令行参数加载配置
+- 修改 config.py 或 config.toml 即可调整 Agent 行为
 """
 
 import os
@@ -26,8 +31,11 @@ from typing import Optional
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 导入配置模块
+from config import Config, get_config
+
 # LangChain 核心组件
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
@@ -40,21 +48,10 @@ from tools.rebirth_tools import trigger_self_restart
 
 
 # ============================================================================
-# 配置与常量
+# 系统提示词模板
 # ============================================================================
 
-# 日志配置
-LOG_LEVEL = logging.INFO
-LOG_FORMAT = '%(asctime)s | %(levelname)-8s | %(message)s'
-DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
-
-# Agent 配置
-AWAKE_INTERVAL = 60  # 每 60 秒苏醒一次
-MODEL_NAME = "gpt-4"  # 或 "gpt-3.5-turbo"
-TEMPERATURE = 0.7
-
-# 系统提示词
-SYSTEM_PROMPT = """你是一个能够自我进化的 AI Agent。
+SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
 
 ## 你的核心能力
 
@@ -150,12 +147,19 @@ SYSTEM_PROMPT = """你是一个能够自我进化的 AI Agent。
 主要文件:
 - agent.py: Agent 主程序入口
 - restarter.py: 进程重启守护脚本
+- config.py: 配置文件
 - tools/: 工具模块目录
   - web_tools.py: 网络工具
   - file_tools.py: 文件工具
   - code_tools.py: 代码编辑工具
   - safety_tools.py: 安全工具（语法检查、备份）
   - rebirth_tools.py: 重启工具
+
+## Agent 配置
+
+- 模型: {model_name}
+- 温度: {temperature}
+- 苏醒间隔: {awake_interval} 秒
 
 请现在开始思考：有什么可以优化或学习的？
 """
@@ -165,17 +169,24 @@ SYSTEM_PROMPT = """你是一个能够自我进化的 AI Agent。
 # 日志配置
 # ============================================================================
 
-def setup_logging() -> logging.Logger:
+def setup_logging(level: str = "INFO", log_format: Optional[str] = None) -> logging.Logger:
     """
     配置全局日志系统。
     
+    Args:
+        level: 日志级别
+        log_format: 日志格式
+        
     Returns:
         配置好的 logger 实例
     """
+    if log_format is None:
+        log_format = '%(asctime)s | %(levelname)-8s | %(message)s'
+    
     logging.basicConfig(
-        level=LOG_LEVEL,
-        format=LOG_FORMAT,
-        datefmt=DATE_FORMAT,
+        level=getattr(logging, level.upper()),
+        format=log_format,
+        datefmt='%Y-%m-%d %H:%M:%S',
         stream=sys.stdout
     )
     return logging.getLogger("SelfEvolvingAgent")
@@ -343,10 +354,11 @@ class SelfEvolvingAgent:
     自我进化 Agent 主类。
     
     基于 LangChain 框架构建，使用 ReAct 风格的 Agent 架构。
-    支持每 60 秒苏醒一次，主动思考优化方向。
+    支持定时苏醒，主动思考优化方向。
     
     Attributes:
         name: Agent 实例名称
+        config: 配置对象
         tools: LangChain Tool 列表
         llm: ChatOpenAI 模型实例
         logger: 日志记录器
@@ -354,46 +366,49 @@ class SelfEvolvingAgent:
     
     def __init__(
         self,
-        name: str = "SelfEvolvingAgent",
-        awake_interval: int = AWAKE_INTERVAL,
-        model_name: str = MODEL_NAME,
-        temperature: float = TEMPERATURE,
-        api_key: Optional[str] = None,
+        config: Optional[Config] = None,
     ) -> None:
         """
         初始化 Agent 实例。
         
         Args:
-            name: Agent 名称
-            awake_interval: 苏醒间隔（秒）
-            model_name: 模型名称
-            temperature: 模型温度
-            api_key: OpenAI API Key（如果为 None，从环境变量读取）
+            config: 配置对象，如果为 None，使用全局默认配置
         """
-        self.name = name
-        self.awake_interval = awake_interval
-        self.logger = logging.getLogger(f"Agent.{name}")
+        # 使用传入的配置或获取全局配置
+        self.config = config or get_config()
         
-        # 获取 API Key
-        if api_key is None:
-            api_key = os.environ.get("OPENAI_API_KEY", "")
+        self.name = self.config.agent.name
+        self.logger = logging.getLogger(f"Agent.{self.name}")
         
-        if not api_key:
+        # 获取 API Key（优先从配置文件读取）
+        self.api_key = self.config.get_api_key()
+        if not self.api_key:
             raise ValueError(
-                "未设置 OPENAI_API_KEY 环境变量。"
-                "请设置: export OPENAI_API_KEY='your-api-key'"
+                "未设置 API Key。\n\n"
+                "请在 config.toml 中配置：\n\n"
+                "[llm]\n"
+                'api_key = "your-api-key"\n\n'
+                "或使用代码设置：\n"
+                "from config import Config\n"
+                "config = Config()\n"
+                "config.llm.api_key = 'your-api-key'"
             )
         
         # 创建 LangChain Tool
         self.tools = create_langchain_tools()
-        self.tool_map = {tool.name: tool for tool in self.tools}
+        self.tool_map = {tool.name for tool in self.tools}
         
         # 创建 LLM
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            api_key=api_key,
-        )
+        llm_kwargs = {
+            "model": self.config.llm.model_name,
+            "temperature": self.config.llm.temperature,
+            "api_key": self.api_key,
+        }
+        
+        if self.config.llm.api_base:
+            llm_kwargs["base_url"] = self.config.llm.api_base
+        
+        self.llm = ChatOpenAI(**llm_kwargs)
         
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.tools)
@@ -402,8 +417,8 @@ class SelfEvolvingAgent:
         self.start_time = datetime.now()
         
         self.logger.info(f"{self.name} 已初始化")
-        self.logger.info(f"苏醒间隔: {self.awake_interval} 秒")
-        self.logger.info(f"模型: {model_name}")
+        self.logger.info(f"苏醒间隔: {self.config.agent.awake_interval} 秒")
+        self.logger.info(f"模型: {self.config.llm.model_name}")
         self.logger.info(f"可用工具: {[t.name for t in self.tools]}")
     
     def _build_system_prompt(self) -> str:
@@ -413,9 +428,12 @@ class SelfEvolvingAgent:
         Returns:
             格式化的系统提示词
         """
-        return SYSTEM_PROMPT.format(
+        return SYSTEM_PROMPT_TEMPLATE.format(
             datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             project_root=os.path.dirname(os.path.abspath(__file__)),
+            model_name=self.config.llm.model_name,
+            temperature=self.config.llm.temperature,
+            awake_interval=self.config.agent.awake_interval,
         )
     
     def _format_tool_result(self, tool_name: str, result: str) -> str:
@@ -475,7 +493,7 @@ class SelfEvolvingAgent:
         
         self.logger.info("Agent 苏醒，开始思考...")
         
-        max_iterations = 10  # 最大工具调用次数，防止无限循环
+        max_iterations = self.config.agent.max_iterations
         iterations = 0
         
         try:
@@ -490,13 +508,8 @@ class SelfEvolvingAgent:
                 # 检查是否有工具调用
                 if not hasattr(response, 'tool_calls') or not response.tool_calls:
                     # 没有工具调用，检查是否表示结束
-                    self.logger.info(f"Agent 响应: {response.content[:200]}...")
-                    
-                    # 检查是否触发重启
-                    if self._should_restart(response.content):
-                        self.logger.info("检测到重启请求...")
-                        # 需要手动触发 restart
-                    
+                    content = response.content[:200] if response.content else ""
+                    self.logger.info(f"Agent 响应: {content}...")
                     return True  # 任务完成，继续运行
                 
                 # 执行工具调用
@@ -507,22 +520,12 @@ class SelfEvolvingAgent:
                     self.logger.info(f"执行工具: {tool_name}")
                     self.logger.debug(f"参数: {tool_args}")
                     
-                    # 查找工具
-                    if tool_name not in self.tool_map:
-                        tool_result = f"错误: 未知工具 {tool_name}"
-                    else:
-                        tool = self.tool_map[tool_name]
-                        try:
-                            # 调用工具
-                            tool_result = tool.invoke(tool_args)
-                        except Exception as e:
-                            tool_result = f"错误: {str(e)}"
+                    # 查找并调用工具
+                    tool_result = self._execute_tool(tool_name, tool_args)
                     
                     # 检查是否是重启工具
                     if tool_name == "trigger_self_restart":
-                        self.logger.info("触发自我重启...")
-                        # 将工具结果添加到消息
-                        messages.append(HumanMessage(
+                        messages.append(ToolMessage(
                             content=self._format_tool_result(tool_name, tool_result),
                             tool_call_id=tool_call['id'],
                         ))
@@ -535,16 +538,12 @@ class SelfEvolvingAgent:
                             self.logger.warning(f"重启失败: {tool_result}")
                             continue
                     
-                    # 将工具结果添加到消息
-                    messages.append(HumanMessage(
+                    # 将工具结果添加到消息（使用 ToolMessage）
+                    messages.append(ToolMessage(
                         content=self._format_tool_result(tool_name, tool_result),
                         tool_call_id=tool_call['id'],
                     ))
-                
-                # 检查是否触发了重启
-                if not self._should_restart(messages[-1].content if hasattr(messages[-1], 'content') else ""):
-                    pass
-                    
+            
             # 达到最大迭代次数
             self.logger.warning(f"达到最大迭代次数 ({max_iterations})，结束当前循环")
             return True
@@ -556,19 +555,62 @@ class SelfEvolvingAgent:
             self.logger.error(f"思考过程中发生错误: {e}", exc_info=True)
             return True  # 发生错误仍然继续运行
     
+    def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
+        """
+        执行工具调用。
+        
+        Args:
+            tool_name: 工具名称
+            tool_args: 工具参数
+            
+        Returns:
+            工具执行结果
+        """
+        tool_func_map = {
+            "web_search_tool": lambda: web_search(**tool_args),
+            "read_webpage_tool": lambda: read_webpage(**tool_args),
+            "list_directory_tool": lambda: list_directory(**tool_args),
+            "read_local_file_tool": lambda: read_local_file(**tool_args),
+            "edit_local_file_tool": lambda: edit_local_file(**tool_args),
+            "create_new_file_tool": lambda: create_new_file(**tool_args),
+            "check_syntax_tool": lambda: check_syntax(**tool_args),
+            "backup_project_tool": lambda: backup_project(**tool_args),
+            "trigger_self_restart_tool": lambda: trigger_self_restart(**tool_args),
+        }
+        
+        if tool_name not in tool_func_map:
+            return f"错误: 未知工具 {tool_name}"
+        
+        try:
+            return tool_func_map[tool_name]()
+        except Exception as e:
+            return f"错误: {str(e)}"
+    
     def run_loop(self) -> None:
         """
         运行 Agent 主循环。
         
-        循环：每 60 秒苏醒一次，思考并行动。
+        循环：定时苏醒，思考并行动。
         """
         self.logger.info("=" * 60)
         self.logger.info(f"{self.name} 主循环开始")
-        self.logger.info(f"苏醒间隔: {self.awake_interval} 秒")
+        self.logger.info(f"苏醒间隔: {self.config.agent.awake_interval} 秒")
         self.logger.info("=" * 60)
+        
+        # 检查是否需要自动备份
+        last_backup_time = time.time()
         
         try:
             while True:
+                # 自动备份检查
+                if self.config.agent.auto_backup:
+                    current_time = time.time()
+                    if current_time - last_backup_time >= self.config.agent.backup_interval:
+                        self.logger.info("执行自动备份...")
+                        backup_result = backup_project(f"自动备份 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                        self.logger.info(f"备份结果: {backup_result[:100]}...")
+                        last_backup_time = current_time
+                
                 # 苏醒并执行思考
                 should_continue = self.think_and_act()
                 
@@ -578,13 +620,14 @@ class SelfEvolvingAgent:
                     break
                 
                 # 显示下次苏醒时间
-                next_wake = datetime.now().timestamp() + self.awake_interval
+                next_wake = datetime.now().timestamp() + self.config.agent.awake_interval
                 next_wake_time = datetime.fromtimestamp(next_wake).strftime("%H:%M:%S")
                 self.logger.info(f"下次苏醒时间: {next_wake_time}")
                 
                 # 休眠等待下次苏醒
-                self.logger.info(f"进入休眠状态 ({self.awake_interval} 秒)...")
-                time.sleep(self.awake_interval)
+                interval = self.config.agent.awake_interval
+                self.logger.info(f"进入休眠状态 ({interval} 秒)...")
+                time.sleep(interval)
                 
         except KeyboardInterrupt:
             self.logger.info("收到中断信号，正在关闭...")
@@ -603,30 +646,113 @@ def main() -> None:
     """
     程序主入口点。
     """
+    # 解析命令行参数
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="自我进化 Agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python agent.py                                    # 使用默认配置
+  python agent.py --config custom.toml               # 使用自定义配置
+  python agent.py --awake-interval 120              # 设置苏醒间隔
+  python agent.py --model gpt-3.5-turbo             # 设置模型
+
+环境变量:
+  OPENAI_API_KEY         OpenAI API Key
+  AGENT_LLM_MODEL_NAME    模型名称
+  AGENT_AWAKE_INTERVAL    苏醒间隔（秒）
+  AGENT_LOG_LEVEL         日志级别
+        """
+    )
+    
+    parser.add_argument(
+        '-c', '--config',
+        dest='config_path',
+        help='配置文件路径'
+    )
+    parser.add_argument(
+        '--awake-interval',
+        type=int,
+        help='苏醒间隔（秒）'
+    )
+    parser.add_argument(
+        '--model',
+        dest='model_name',
+        help='模型名称'
+    )
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        help='温度参数'
+    )
+    parser.add_argument(
+        '--log-level',
+        dest='log_level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='日志级别'
+    )
+    parser.add_argument(
+        '--name',
+        help='Agent 名称'
+    )
+    
+    args = parser.parse_args()
+    
+    # 创建配置
+    config = Config(
+        config_path=args.config_path,
+        # 命令行参数优先级最高
+        **{k: v for k, v in {
+            'llm.model_name': args.model_name,
+            'llm.temperature': args.temperature,
+            'agent.awake_interval': args.awake_interval,
+            'agent.name': args.name,
+            'log.level': args.log_level,
+        }.items() if v is not None}
+    )
+    
     # 配置日志
-    logger = setup_logging()
+    logger = setup_logging(level=config.log.level)
     
     logger.info("=" * 60)
     logger.info("自我进化 Agent 系统启动")
     logger.info("=" * 60)
+    logger.info(f"配置文件: {args.config_path or '默认'}")
     
-    # 检查环境变量
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    # 检查 API Key
+    api_key = config.get_api_key()
     if not api_key:
         logger.error("错误: 未设置 OPENAI_API_KEY 环境变量")
-        logger.info("请在运行前设置: $env:OPENAI_API_KEY='your-api-key'")
-        logger.info("或者: export OPENAI_API_KEY='your-api-key'")
+        logger.info("")
+        logger.info("请选择以下方式之一设置 API Key：")
+        logger.info("1. 设置环境变量:")
+        logger.info("   Windows: $env:OPENAI_API_KEY='your-api-key'")
+        logger.info("   Linux/Mac: export OPENAI_API_KEY='your-api-key'")
+        logger.info("")
+        logger.info("2. 在 config.toml 中设置:")
+        logger.info("   [llm]")
+        logger.info("   api_key = 'your-api-key'")
+        logger.info("")
+        logger.info("3. 命令行参数（仅用于测试）:")
+        logger.info("   $env:OPENAI_API_KEY='your-api-key'; python agent.py")
         sys.exit(1)
     
     try:
         # 创建并运行 Agent
-        agent = SelfEvolvingAgent(name="EvoAgent-001")
+        agent = SelfEvolvingAgent(config=config)
         
-        logger.info(f"Agent 状态:")
+        logger.info("")
+        logger.info("Agent 配置:")
         logger.info(f"  - 名称: {agent.name}")
-        logger.info(f"  - 模型: {MODEL_NAME}")
-        logger.info(f"  - 苏醒间隔: {AWAKE_INTERVAL} 秒")
+        logger.info(f"  - 模型: {config.llm.model_name}")
+        logger.info(f"  - 温度: {config.llm.temperature}")
+        logger.info(f"  - 苏醒间隔: {config.agent.awake_interval} 秒")
+        logger.info(f"  - 最大迭代: {config.agent.max_iterations}")
+        logger.info(f"  - 自动备份: {config.agent.auto_backup}")
         logger.info(f"  - 工具数量: {len(agent.tools)}")
+        logger.info("")
         
         # 启动主循环
         agent.run_loop()

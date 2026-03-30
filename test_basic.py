@@ -1,0 +1,1 @@
+print('basic test')
