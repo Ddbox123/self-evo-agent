@@ -15,7 +15,6 @@
 
 import logging
 import os
-import re
 import shutil
 from pathlib import Path
 from typing import Optional, Tuple
@@ -130,7 +129,7 @@ def validate_path(file_path: str, must_exist: bool = False) -> Tuple[bool, str]:
         path = Path(file_path)
         abs_path = path.resolve()
         
-        # 检查文件存在性
+        # 检���文件存在性
         if must_exist and not abs_path.exists():
             return False, f"文件不存在: {abs_path}"
         
@@ -156,42 +155,6 @@ def validate_path(file_path: str, must_exist: bool = False) -> Tuple[bool, str]:
         return False, f"路径验证失败: {e}"
 
 
-def format_diff(old_content: str, new_content: str, 
-                search_string: str, max_context: int = 3) -> str:
-    """
-    格式化差异输出，用于显示更改内容。
-    
-    Args:
-        old_content: 原始内容
-        new_content: 新内容
-        search_string: 被搜索的字符串
-        max_context: 上下文行数
-        
-    Returns:
-        格式化的差异字符串
-    """
-    lines = old_content.split('\n')
-    result_lines = []
-    
-    # 找到搜索字符串的位置
-    search_idx = old_content.find(search_string)
-    if search_idx == -1:
-        return "未找到搜索字符串"
-    
-    # 计算行号
-    line_num = old_content[:search_idx].count('\n')
-    
-    # 添加上下文
-    start_line = max(0, line_num - max_context)
-    end_line = min(len(lines), line_num + search_string.count('\n') + max_context + 1)
-    
-    for i, line in enumerate(lines[start_line:end_line], start=start_line + 1):
-        prefix = " " if i != line_num + 1 else ">"
-        result_lines.append(f"{prefix} {i:4d} | {line}")
-    
-    return '\n'.join(result_lines)
-
-
 # ============================================================================
 # 核心功能函数
 # ============================================================================
@@ -200,10 +163,11 @@ def edit_local_file(file_path: str, search_string: str,
                    replace_string: str, create_backup_first: bool = True) -> str:
     """
     编辑本地文件，替换指定内容。
-    
+
     此函数在文件中搜索指定的字符串，并将其替换为新内容。
-    支持多种匹配模式，并自动创建备份以确保安全性。
-    
+    只有当搜索字符串在文件中恰好出现一次时，才执行替换操作。
+    替换前会自动创建备份文件。
+
     Args:
         file_path: 要编辑的文件路径。
                   可以是相对路径或绝对路径。
@@ -234,22 +198,27 @@ def edit_local_file(file_path: str, search_string: str,
         操作结果的描述字符串。
         
         成功时返回格式：
-        成功: 已替换文件中的内容
+        ============================================
+        ✓ 编辑成功
         文件: /path/to/file.py
         备份: /path/to/file.py.bak (已创建)
         
         替换详情:
-        - 匹配次数: 1
-        - 原字符串长度: 25 字符
-        - 新字符串长度: 30 字符
+          - 匹配次数: 1 (精确匹配)
+          - 原字符串: "def main():"
+          - 新字符串: "async def main():"
+        
+        ⚠ 强烈建议: 立即调用 check_syntax 进行语法自检！
+        命令: check_syntax("file.py")
+        ============================================
         
         失败时返回错误描述：
         - "错误: 文件路径不能为空"
         - "错误: 搜索字符串不能为空"
         - "错误: 文件不存在 - /path/to/file"
         - "错误: 不支持编辑此类型的文件"
-        - "错误: 未找到搜索字符串"
-        - "错误: 找到多个匹配项 (N 个)，请提供更精确的搜索字符串"
+        - "错误: 未找到目标代码"
+        - "错误: 找到多个匹配项 (N 个)，请提供更长的上下文以确保唯一性"
         - "错误: 文件编辑失败 - PermissionError"
     
     Raises:
@@ -267,8 +236,8 @@ def edit_local_file(file_path: str, search_string: str,
         - 搜索是大小敏感的
         - 支持跨行匹配
         - 自动创建 .bak 备份文件
-        - 如果找到多个匹配，只替换第一个
-        - 使用前请仔细检查搜索字符串的唯一性
+        - 仅当匹配次数严格为 1 时才执行替换
+        - 替换后强烈建议调用 check_syntax 进行自检
     """
     logger.info(f"编辑文件: {file_path}")
     logger.debug(f"搜索字符串: {repr(search_string[:100])}...")
@@ -293,21 +262,24 @@ def edit_local_file(file_path: str, search_string: str,
         return f"错误: 不支持编辑此类型的文件 - {abs_path}"
     
     try:
-        # 读取原文件内容
+        # ========== 步骤 1: 读取目标文件内容 ==========
         with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
             old_content = f.read()
         
-        # 检查搜索字符串是否存在
-        if search_string not in old_content:
-            logger.error("未找到搜索字符串")
-            return "错误: 未找到搜索字符串"
-        
-        # 检查是否有多处匹配
+        # ========== 步骤 2: 统计 search_string 出现次数 ==========
         count = old_content.count(search_string)
-        if count > 1:
-            logger.warning(f"找到多个匹配项: {count}")
-            return f"错误: 找到多个匹配项 ({count} 个)，请提供更精确的搜索字符串"
         
+        # 情况 1: 未找到目标代码
+        if count == 0:
+            logger.error("未找到目标代码")
+            return "错误: 未找到目标代码"
+        
+        # 情况 2: 找到多个匹配项
+        if count > 1:
+            logger.warning(f"找到多个匹配项: {count} 个")
+            return f"错误: 找到多个匹配项 ({count} 个)，请提供更长的上下文以确保唯一性"
+        
+        # ========== 步骤 3: 匹配次数严格为 1，执行替换 ==========
         # 创建备份
         backup_path = None
         if create_backup_first:
@@ -318,13 +290,19 @@ def edit_local_file(file_path: str, search_string: str,
         # 执行替换
         new_content = old_content.replace(search_string, replace_string, 1)
         
-        # 写入文件
+        # 保存文件
         with open(abs_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
         
-        # 构建结果
+        # ========== 步骤 4: 构建成功返回信息 ==========
+        # 截断显示搜索字符串（过长时）
+        search_display = search_string[:50] + "..." if len(search_string) > 50 else search_string
+        replace_display = replace_string[:50] + "..." if len(replace_string) > 50 else replace_string
+        
         result_lines = [
-            "成功: 已替换文件中的内容",
+            "=" * 50,
+            "✓ 编辑成功",
+            "=" * 50,
             f"文件: {abs_path}",
         ]
         
@@ -334,9 +312,14 @@ def edit_local_file(file_path: str, search_string: str,
         result_lines.extend([
             "",
             "替换详情:",
-            f"- 匹配次数: 1",
-            f"- 原字符串长度: {len(search_string)} 字符",
-            f"- 新字符串长度: {len(replace_string)} 字符",
+            f"  - 匹配次数: 1 (精确匹配)",
+            f"  - 原字符串: \"{search_display}\"",
+            f"  - 新字符串: \"{replace_display}\"",
+            "",
+            "=" * 50,
+            "⚠ 强烈建议: 立即调用 check_syntax 进行语法自检！",
+            f"命令: check_syntax(\"{abs_path}\")",
+            "=" * 50,
         ])
         
         logger.info(f"文件编辑成功: {abs_path}")
@@ -466,7 +449,6 @@ def create_new_file(file_path: str, content: str = "",
                 return f"错误: 文件已存在 (overwrite=False)\n如需覆盖，请设置 overwrite=True"
             
             # 覆盖模式：先创建备份
-            import shutil
             backup_path = abs_path.with_suffix(abs_path.suffix + '.backup')
             shutil.copy2(abs_path, backup_path)
             logger.info(f"已备份原文件: {backup_path}")
@@ -488,7 +470,6 @@ def create_new_file(file_path: str, content: str = "",
             f.write(content)
         
         # 对于有 shebang 的脚本，设置执行权限（Unix 系统）
-        import sys
         if sys.platform != 'win32' and content.startswith('#!'):
             import stat
             current_mode = abs_path.stat().st_mode

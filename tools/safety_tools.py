@@ -12,6 +12,7 @@
     - ast: 内置模块 (Python)
     - shutil: 内置模块
     - datetime: 内置模块
+    - traceback: 内置模块
 """
 
 import ast
@@ -19,12 +20,11 @@ import logging
 import os
 import shutil
 import sys
-import tarfile
-import tempfile
+import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 
 # ============================================================================
@@ -36,18 +36,6 @@ logger = logging.getLogger(__name__)
 
 # 备份目录
 DEFAULT_BACKUP_DIR = "backups"
-
-# 最大备份保留数量
-MAX_BACKUP_COUNT = 50
-
-# 要检查语法的文件扩展名
-CHECKABLE_EXTENSIONS = {
-    '.py': 'python',
-    '.js': 'javascript',
-    '.ts': 'typescript',
-    '.jsx': 'jsx',
-    '.tsx': 'tsx',
-}
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -69,85 +57,6 @@ def ensure_backup_dir() -> Path:
     return backup_dir
 
 
-def get_project_files(include_patterns: Optional[List[str]] = None,
-                      exclude_patterns: Optional[List[str]] = None) -> List[Path]:
-    """
-    获取项目中的所有源代码文件。
-    
-    Args:
-        include_patterns: 包含的文件模式列表
-        exclude_patterns: 排除的文件模式列表
-        
-    Returns:
-        文件路径列表
-    """
-    if include_patterns is None:
-        include_patterns = ['*.py', '*.js', '*.ts', '*.jsx', '*.tsx']
-    
-    if exclude_patterns is None:
-        exclude_patterns = [
-            '__pycache__', '.git', '.venv', 'venv',
-            'node_modules', '.pytest_cache', '.mypy_cache',
-            '*.pyc', '*.pyo', 'dist', 'build', '.eggs'
-        ]
-    
-    files = []
-    
-    for pattern in include_patterns:
-        for path in PROJECT_ROOT.rglob(pattern):
-            # 检查是否应该排除
-            should_exclude = False
-            for exclude in exclude_patterns:
-                if exclude.startswith('*'):
-                    if path.suffix == exclude[1:]:
-                        should_exclude = True
-                        break
-                elif exclude in str(path):
-                    should_exclude = True
-                    break
-            
-            if not should_exclude and path.is_file():
-                files.append(path)
-    
-    return sorted(files)
-
-
-def clean_old_backups(backup_dir: Path, max_count: int = MAX_BACKUP_COUNT) -> int:
-    """
-    清理多余的旧备份。
-    
-    Args:
-        backup_dir: 备份目录
-        max_count: 保留的最大备份数量
-        
-    Returns:
-        删除的备份数量
-    """
-    try:
-        # 获取所有备份文件，按修改时间排序
-        backups = sorted(
-            backup_dir.glob('backup_*.zip'),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )
-        
-        # 删除多余的备份
-        deleted = 0
-        for backup in backups[max_count:]:
-            try:
-                backup.unlink()
-                deleted += 1
-                logger.debug(f"已删除旧备份: {backup.name}")
-            except Exception as e:
-                logger.warning(f"删除备份失败: {backup.name}, {e}")
-        
-        return deleted
-        
-    except Exception as e:
-        logger.error(f"清理备份失败: {e}")
-        return 0
-
-
 def format_timestamp(dt: Optional[datetime] = None) -> str:
     """
     格式化时间戳。
@@ -163,103 +72,93 @@ def format_timestamp(dt: Optional[datetime] = None) -> str:
     return dt.strftime('%Y%m%d_%H%M%S')
 
 
+def format_size(size_bytes: int) -> str:
+    """
+    格式化文件大小。
+    
+    Args:
+        size_bytes: 字节数
+        
+    Returns:
+        格式化的大小字符串
+    """
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
 # ============================================================================
 # 核心功能函数
 # ============================================================================
 
-def check_syntax(file_path: str, language: Optional[str] = None) -> str:
+def check_syntax(file_path: str) -> str:
     """
-    检查文件的语法正确性。
+    检查 Python 文件的语法正确性。
     
-    此函数对指定的代码文件进行语法检查，返回详细的检查报告。
-    主要用于 Agent 修改代码后验证修改的正确性，防止引入语法错误。
+    使用 Python 内置的 ast 模块解析目标文件，执行以下检查：
+    1. 读取文件内容
+    2. 使用 ast.parse() 解析源码
+    3. 如果捕获到 SyntaxError，生成详细的错误追踪信息
+    4. 如果成功，返回 'Syntax OK'
     
     Args:
-        file_path: 要检查的文件路径。
+        file_path: 要检查的 Python 文件路径。
                   支持相对路径和绝对路径。
                   
                   示例：
                   - "agent.py" - 当前目录
                   - "./tools/web_tools.py" - 相对路径
                   - "/path/to/project/main.py" - 绝对路径
-                  - "*.py" 或 "tools/*.py" - 模式匹配（检查多个文件）
-                  
-        language: 代码语言。
-                 默认为 None，表示根据文件扩展名自动检测。
-                 支持的值：
-                 - "python" 或 "py"
-                 - "javascript" 或 "js"
-                 - "typescript" 或 "ts"
-                 
-                 注意：目前主要支持 Python 语法检查，
-                 其他语言返回相应提示。
     
     Returns:
-        格式化的检查报告字符串。
+        检查结果字符串。
         
-        Python 语法检查成功时：
-        ```
-        ✓ 语法检查通过
-        文件: /path/to/file.py
-        行数: 150
-        预估复杂度: 中等
+        语法正确时：
+        >>> check_syntax("agent.py")
+        'Syntax OK'
         
-        分析摘要:
-        - 导入语句: 12
-        - 函数定义: 8
-        - 类定义: 2
-        - 顶级语句: 5
-        ```
+        语法错误时返回详细追踪信息：
+        >>> check_syntax("broken.py")
+        '''
+        Traceback (most recent call last):
+          File "broken.py", line 10
+            print("hello
+                       ^
+        SyntaxError: invalid syntax
         
-        检查成功但有问题时：
-        ```
-        ⚠ 语法检查完成，发现问题
-        文件: /path/to/file.py
-        错误数: 2
+        错误位置:
+          - 文件: broken.py
+          - 行号: 10
+          - 列号: 14
+          - 错误类型: SyntaxError
+          - 错误信息: invalid syntax
         
-        问题详情:
-        1. 第 25 行: unexpected EOF while parsing
-           提示: 可能缺少闭合括号
-           
-        2. 第 30 行: invalid syntax
-           提示: 'return' 语句不能在函数外部使用
-        ```
-        
-        无法检查时：
-        ```
-        ⚠ 无法执行语法检查
-        文件: /path/to/file.py
-        原因: 不支持此文件类型的语法检查 (.js)
-        
-        提示: JavaScript/TypeScript 文件可以使用以下工具检查：
-        - ESLint
-        - TypeScript 编译器 (tsc --noEmit)
-        ```
-        
-        失败时：
-        - "错误: 文件不存在"
-        - "错误: 无法读取文件"
+        可能的原因:
+          - 字符串未正确闭合（缺少引号）
+          - 括号/方括号/花括号未配对
+          - 缩进不一致
+          - 关键字拼写错误
+        '''
     
     Raises:
         此函数不抛出异常，所有错误都通过返回字符串报告。
     
     Example:
-        >>> result = check_syntax("agent.py")
+        >>> result = check_syntax("tools/code_tools.py")
         >>> print(result)
-        >>> # 输出检查结果
+        Syntax OK
         
-        >>> # 检查多个文件
-        >>> for f in ["a.py", "b.py", "c.py"]:
-        ...     print(check_syntax(f))
-        
-        >>> # 指定语言
-        >>> result = check_syntax("script.py", language="python")
+        >>> result = check_syntax("broken_file.py")
+        >>> print(result)
+        Traceback (most recent call last):
+          ...
     
     Notes:
-        - Python 文件使用内置的 ast 模块进行深度分析
-        - 不仅仅是语法检查，还会分析代码结构
-        - 返回代码统计信息（函数数、类数等）
-        - 对于不支持的语言，提供替代工具建议
+        - 仅支持 Python 文件（.py 后缀）
+        - 使用 Python 标准库的 ast 模块进行解析
+        - 错误信息包含完整的 traceback，便于 Agent 理解错误位置
     """
     logger.info(f"检查语法: {file_path}")
     
@@ -278,19 +177,6 @@ def check_syntax(file_path: str, language: Optional[str] = None) -> str:
     except Exception as e:
         return f"错误: 无效的路径 - {e}"
     
-    # 处理通配符
-    if '*' in str(abs_path):
-        results = []
-        for matched in PROJECT_ROOT.glob(str(abs_path)):
-            if matched.is_file():
-                result = check_syntax(str(matched), language)
-                results.append(result)
-        
-        if not results:
-            return f"错误: 没有匹配的文件: {file_path}"
-        
-        return "\n\n" + "=" * 50 + "\n\n".join(results)
-    
     # 检查文件存在
     if not abs_path.exists():
         return f"错误: 文件不存在 - {abs_path}"
@@ -298,274 +184,141 @@ def check_syntax(file_path: str, language: Optional[str] = None) -> str:
     if not abs_path.is_file():
         return f"错误: 路径不是文件 - {abs_path}"
     
-    # 检测语言
-    ext = abs_path.suffix.lower()
+    # 检查是否为 Python 文件
+    if abs_path.suffix.lower() != '.py':
+        return f"错误: 仅支持 .py 文件 - {abs_path}"
     
-    if language is None:
-        language = CHECKABLE_EXTENSIONS.get(ext, None)
-    
-    # Python 语法检查
-    if language in ('python', 'py') or ext == '.py':
-        return _check_python_syntax(abs_path)
-    
-    # 不支持的语言
-    lang_name = {
-        '.js': 'JavaScript',
-        '.ts': 'TypeScript',
-        '.jsx': 'JSX',
-        '.tsx': 'TSX',
-    }.get(ext, ext)
-    
-    suggestions = {
-        '.js': 'ESLint、TypeScript 编译器 (tsc)',
-        '.ts': 'TypeScript 编译器 (tsc --noEmit)',
-        '.jsx': 'ESLint',
-        '.tsx': 'ESLint',
-    }
-    
-    return f"""⚠ 无法执行语法检查
-文件: {abs_path}
-原因: 不支持此文件类型的语法检查 ({lang_name})
-
-提示: {suggestions.get(ext, '请使用相应的 linter 或编译器')}"""
-
-
-def _check_python_syntax(file_path: Path) -> str:
-    """
-    Python 专用的语法检查。
-    
-    Args:
-        file_path: Python 文件路径
-        
-    Returns:
-        检查结果字符串
-    """
     try:
-        # 读取文件
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        # 读取文件内容
+        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
             source = f.read()
         
-        # 解析 AST
-        try:
-            tree = ast.parse(source, filename=str(file_path))
-        except SyntaxError as e:
-            # 语法错误
-            error_type = e.__class__.__name__
-            error_msg = str(e).replace('\n', ' ') if str(e) else error_type
-            
-            # 生成提示
-            hints = _generate_syntax_hint(e)
-            
-            return f"""⚠ 语法检查完成，发现问题
-文件: {file_path}
-错误数: 1
-
-问题详情:
-  第 {e.lineno} 行: {error_msg}
-  {hints}"""
+        # 使用 ast.parse() 检查语法
+        # 如果语法正确，ast.parse() 会返回一个 ast.Module 对象
+        # 如果有语法错误，会抛出 SyntaxError 异常
+        ast.parse(source, filename=str(abs_path))
         
-        # 代码分析
-        analysis = _analyze_python_code(tree)
+        # 语法检查通过
+        logger.info(f"语法检查通过: {abs_path}")
+        return "Syntax OK"
         
-        # 复杂度评估
-        complexity = _estimate_complexity(tree)
+    except SyntaxError as e:
+        # 捕获语法错误，生成详细的 traceback 信息
+        logger.warning(f"语法错误: {abs_path}, {e}")
         
-        # 成功结果
-        return f"""✓ 语法检查通过
-文件: {file_path}
-行数: {source.count('\n') + 1}
-预估复杂度: {complexity}
-
-分析摘要:
-- 导入语句: {analysis['imports']}
-- 函数定义: {analysis['functions']}
-- 类定义: {analysis['classes']}
-- 顶级语句: {analysis['top_level']}"""
+        # 使用 traceback 模块生成详细的错误追踪
+        tb_lines = traceback.format_exception(
+            type(e).__name__,
+            e,
+            e.__traceback__,
+            limit=10  # 限制追溯深度
+        )
+        traceback_str = ''.join(tb_lines)
+        
+        # 构建详细的错误报告
+        error_report = []
+        error_report.append("=" * 60)
+        error_report.append("语法错误详情")
+        error_report.append("=" * 60)
+        error_report.append("")
+        error_report.append("Traceback (most recent call last):")
+        error_report.append(traceback_str)
+        error_report.append("")
+        error_report.append("=" * 60)
+        error_report.append("错误位置:")
+        error_report.append(f"  - 文件: {abs_path}")
+        error_report.append(f"  - 行号: {e.lineno}")
+        if hasattr(e, 'offset') and e.offset:
+            error_report.append(f"  - 列号: {e.offset}")
+        error_report.append(f"  - 错误类型: {type(e).__name__}")
+        error_report.append(f"  - 错误信息: {e.msg if hasattr(e, 'msg') else str(e)}")
+        error_report.append("")
+        error_report.append("=" * 60)
+        error_report.append("可能的修复建议:")
+        
+        # 根据错误类型提供具体的修复建议
+        error_msg = str(e).lower()
+        
+        if 'eof' in error_msg:
+            error_report.append("  - 检查是否缺少闭合符号: ) ] } \" '")
+            error_report.append("  - 多行字符串可能未正确结束")
+        elif 'unterminated' in error_msg or 'eol' in error_msg:
+            error_report.append("  - 字符串引号未正确闭合")
+            error_report.append("  - 检查是否在字符串中间换行")
+        elif 'invalid syntax' in error_msg:
+            error_report.append("  - 检查是否有非法字符或拼写错误")
+            error_report.append("  - 确保关键字拼写正确（如 def, return, import 等）")
+        elif 'unexpected' in error_msg:
+            error_report.append("  - 检查语句是否在正确的作用域内")
+            error_report.append("  - 确保缩进正确")
+        elif 'indent' in error_msg:
+            error_report.append("  - 检查缩进是否一致（建议使用 4 空格）")
+            error_report.append("  - 确保没有混用空格和 Tab")
+            error_report.append("  - 类和函数的定义需要正确的缩进层级")
+        elif 'paren' in error_msg or 'bracket' in error_msg or 'brace' in error_msg:
+            error_report.append("  - 检查括号/方括号/花括号是否配对")
+            error_report.append("  - 确保每个开符号都有对应的闭符号")
+        elif 'named' in error_msg and 'must' in error_msg:
+            error_report.append("  - 关键字参数赋值错误")
+            error_report.append("  - 检查是否使用了保留关键字作为变量名")
+        else:
+            error_report.append("  - 请仔细检查错误行的语法")
+            error_report.append("  - 对照 Python 语法规范进行修正")
+        
+        error_report.append("=" * 60)
+        
+        return '\n'.join(error_report)
+        
+    except UnicodeDecodeError:
+        return f"错误: 文件编码问题，请确保文件是 UTF-8 编码 - {abs_path}"
         
     except PermissionError:
-        return f"错误: 无法读取文件（权限不足）- {file_path}"
+        return f"错误: 权限不足，无法读取文件 - {abs_path}"
+        
     except Exception as e:
+        logger.error(f"检查失败: {e}", exc_info=True)
         return f"错误: 检查失败 - {str(e)}"
-
-
-def _generate_syntax_hint(error: SyntaxError) -> str:
-    """
-    根据语法错误生成修复提示。
-    
-    Args:
-        error: SyntaxError 对象
-        
-    Returns:
-        提示字符串
-    """
-    msg = str(error).lower()
-    
-    hints = {
-        'eof': '提示: 可能缺少闭合括号、方括号或引号',
-        'unexpected': '提示: 检查语句是否在正确的作用域内',
-        'invalid syntax': '提示: 可能是缩进错误或使用了非法字符',
-        'paren': '提示: 括号未正确闭合',
-        'bracket': '提示: 方括号未正确闭合',
-        'brace': '提示: 花括号未正确闭合',
-        'unterminated': '提示: 字符串引号未正确闭合',
-        'indent': '提示: 检查缩进是否一致（建议使用 4 空格）',
-    }
-    
-    for key, hint in hints.items():
-        if key in msg:
-            return hint
-    
-    return '提示: 请检查相关行的语法'
-
-
-def _analyze_python_code(tree: ast.AST) -> Dict[str, int]:
-    """
-    分析 Python 代码结构。
-    
-    Args:
-        tree: AST 树
-        
-    Returns:
-        包含统计信息的字典
-    """
-    analysis = {
-        'imports': 0,
-        'functions': 0,
-        'classes': 0,
-        'top_level': 0,
-    }
-    
-    class CodeVisitor(ast.NodeVisitor):
-        def visit_Import(self, node):
-            analysis['imports'] += 1
-            self.generic_visit(node)
-        
-        def visit_ImportFrom(self, node):
-            analysis['imports'] += 1
-            self.generic_visit(node)
-        
-        def visit_FunctionDef(self, node):
-            if isinstance(node.parent, ast.Module) if hasattr(ast, 'parent') else True:
-                analysis['functions'] += 1
-            self.generic_visit(node)
-        
-        def visit_ClassDef(self, node):
-            analysis['classes'] += 1
-            self.generic_visit(node)
-    
-    visitor = CodeVisitor()
-    visitor.visit(tree)
-    
-    # 统计顶级语句
-    analysis['top_level'] = len([n for n in tree.body 
-                                 if not isinstance(n, (ast.Import, ast.ImportFrom,
-                                                       ast.FunctionDef, ast.ClassDef))])
-    
-    return analysis
-
-
-def _estimate_complexity(tree: ast.AST) -> str:
-    """
-    估算代码复杂度。
-    
-    Args:
-        tree: AST 树
-        
-    Returns:
-        复杂度等级描述
-    """
-    # 统计各种节点
-    class ComplexityVisitor(ast.NodeVisitor):
-        def __init__(self):
-            self.functions = 0
-            self.conditionals = 0
-            self.loops = 0
-            self.comprehensions = 0
-        
-        def visit_FunctionDef(self, node):
-            self.functions += 1
-            self.generic_visit(node)
-        
-        def visit_If(self, node):
-            self.conditionals += 1
-            self.generic_visit(node)
-        
-        def visit_For(self, node):
-            self.loops += 1
-            self.generic_visit(node)
-        
-        def visit_While(self, node):
-            self.loops += 1
-            self.generic_visit(node)
-        
-        def visit_ListComp(self, node):
-            self.comprehensions += 1
-            self.generic_visit(node)
-        
-        def visit_DictComp(self, node):
-            self.comprehensions += 1
-            self.generic_visit(node)
-        
-        def visit_SetComp(self, node):
-            self.comprehensions += 1
-            self.generic_visit(node)
-    
-    visitor = ComplexityVisitor()
-    visitor.visit(tree)
-    
-    # 计算简单复杂度分数
-    score = (visitor.functions * 2 + 
-             visitor.conditionals * 1.5 + 
-             visitor.loops * 2 +
-             visitor.comprehensions * 1.5)
-    
-    if score < 10:
-        return "简单"
-    elif score < 30:
-        return "中等"
-    elif score < 60:
-        return "复杂"
-    else:
-        return "非常复杂"
 
 
 def backup_project(version_note: str = "") -> str:
     """
     创建项目备份。
     
-    此函数将整个项目打包成压缩文件，便于在重大修改前保存快照。
-    支持时间戳命名和版本注释，便于管理和恢复。
+    使用 shutil 模块将以下内容打包成 zip 文件：
+    1. tools/ 目录（包含所有工具模块）
+    2. agent.py（主入口文件）
+    
+    备份文件将保存到 backups/ 目录，使用时间戳命名。
     
     Args:
         version_note: 版本注释/说明。
-                     用于描述此次备份的用途或版本信息。
+                     用于描述此次备份的用途。
                      
                      示例：
-                     - "重大重构前"
-                     - "添加新功能 v1.2"
-                     - "修复关键 bug"
-                     - "daily backup"
+                     - "添加新功能"
+                     - "修复 bug"
+                     - "重大重构"
                      - "" (空注释也允许)
     
     Returns:
         操作结果的描述字符串。
         
         成功时返回：
-        ```
-        ✓ 备份创建成功
-        文件: backups/backup_20240115_103000_v1.zip
-        大小: 2.5 MB
-        
-        版本说明: 重大重构前
-        包含文件: 25 个文件, 3 个目录
+        >>> backup_project("测试备份")
+        '''
+        备份创建成功
+        文件: backups/backup_20240115_103000.zip
+        大小: 15.3 KB
+        包含: agent.py, tools/
+        版本说明: 测试备份
         
         提示: 如需恢复，请解压备份文件到项目目录
-        ```
+        '''
         
         失败时返回错误描述：
         - "错误: 备份目录创建失败"
-        - "错误: 没有找到要备份的文件"
-        - "错误: 备份创建失败 - 磁盘空间不足"
+        - "错误: 源文件不存在"
+        - "错误: 备份创建失败"
     
     Raises:
         此函数不抛出异常，所有错误都通过返回字符串报告。
@@ -573,123 +326,136 @@ def backup_project(version_note: str = "") -> str:
     Example:
         >>> result = backup_project("添加 web_tools 模块")
         >>> print(result)
-        >>> # 输出备份结果
         
-        >>> # 定期自动备份
-        >>> result = backup_project(f"每日备份 {datetime.now().date()}")
+        >>> # 快速备份
+        >>> result = backup_project()
         >>> print(result)
     
     Notes:
         - 备份文件保存在项目根目录的 backups/ 文件夹
         - 文件名格式: backup_YYYYMMDD_HHMMSS.zip
         - 包含版本注释作为元数据
-        - 自动清理超过限制的旧备份（保留最近 50 个）
-        - 排除缓存、临时文件和构建产物
+        - 使用 shutil 模块进行文件复制和打包
     """
     logger.info("创建项目备份")
     
     # 生成时间戳
     timestamp = format_timestamp()
-    
-    # 清理版本注释（用于文件名）
-    safe_note = re.sub(r'[^\w\-]', '_', version_note)[:30] if version_note else ""
-    if safe_note:
-        backup_filename = f"backup_{timestamp}_{safe_note}.zip"
-    else:
-        backup_filename = f"backup_{timestamp}.zip"
+    backup_filename = f"backup_{timestamp}.zip"
     
     # 确保备份目录存在
     try:
         backup_dir = ensure_backup_dir()
+        logger.info(f"备份目录: {backup_dir}")
     except Exception as e:
         return f"错误: 备份目录创建失败 - {str(e)}"
     
     backup_path = backup_dir / backup_filename
     
-    # 获取要备份的文件
-    files_to_backup = get_project_files()
+    # 定义要备份的内容
+    # 1. agent.py
+    # 2. tools/ 目录
+    agent_file = PROJECT_ROOT / "agent.py"
+    tools_dir = PROJECT_ROOT / "tools"
     
-    if not files_to_backup:
-        return "错误: 没有找到要备份的文件"
+    # 检查源文件是否存在
+    if not agent_file.exists():
+        return f"错误: agent.py 不存在 - {agent_file}"
+    
+    if not tools_dir.exists():
+        return f"错误: tools/ 目录不存在 - {tools_dir}"
+    
+    if not tools_dir.is_dir():
+        return f"错误: tools/ 不是目录 - {tools_dir}"
     
     try:
-        # 创建 ZIP 压缩包
-        file_count = 0
+        # 使用 shutil 打包
+        # 首先创建临时目录，将要备份的文件复制进去
+        import tempfile
+        import re
         
-        with zipfile.ZipFile(backup_path, 'w', 
-                            compression=zipfile.ZIP_DEFLATED,
-                            compresslevel=6) as zf:
-            # 添加说明文件
-            metadata = f"""项目备份元数据
-==================
-
-备份时间: {datetime.now().isoformat()}
-版本说明: {version_note or '(无)'}
-包含文件: {len(files_to_backup)}
-"""
-            zf.writestr('METADATA.txt', metadata)
-            file_count += 1
+        # 创建临时工作目录
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
             
-            # 添加项目文件
-            for file_path in files_to_backup:
-                try:
-                    arcname = file_path.relative_to(PROJECT_ROOT)
-                    zf.write(file_path, arcname)
-                    file_count += 1
-                except Exception as e:
-                    logger.warning(f"跳过文件: {file_path}, {e}")
+            # 复制 agent.py 到临时目录
+            agent_dest = temp_path / "agent.py"
+            shutil.copy2(agent_file, agent_dest)
+            logger.debug(f"已复制: {agent_file} -> {agent_dest}")
+            
+            # 递归复制 tools/ 目录到临时目录
+            tools_dest = temp_path / "tools"
+            shutil.copytree(tools_dir, tools_dest)
+            logger.debug(f"已复制: {tools_dir} -> {tools_dest}")
+            
+            # 创建 ZIP 文件
+            # 使用 shutil.make_archive 创建 zip
+            # 注意：make_archive 会自动添加 .zip 后缀
+            archive_base = temp_path / f"backup_{timestamp}"
+            
+            # 手动创建 zip 文件以获得更好的控制
+            with zipfile.ZipFile(backup_path, 'w', 
+                                compression=zipfile.ZIP_DEFLATED,
+                                compresslevel=9) as zf:
+                # 添加元数据文件
+                metadata = f"""Self-Evolving Agent Backup
+=========================
+
+Backup Time: {datetime.now().isoformat()}
+Timestamp: {timestamp}
+Version Note: {version_note or '(none)'}
+
+Contents:
+- agent.py
+- tools/ (all modules)
+"""
+                zf.writestr('METADATA.txt', metadata)
+                
+                # 添加 agent.py
+                zf.write(agent_dest, arcname='agent.py')
+                
+                # 递归添加 tools/ 目录中的所有文件
+                file_count = 1  # 包含 METADATA.txt
+                for root, dirs, files in os.walk(tools_dest):
+                    for file in files:
+                        # 跳过 __pycache__ 和 .pyc 文件
+                        if '__pycache__' in root or file.endswith('.pyc'):
+                            continue
+                        
+                        file_path = Path(root) / file
+                        arcname = file_path.relative_to(tools_dest)
+                        zf.write(file_path, arcname=f'tools/{arcname}')
+                        file_count += 1
+                        logger.debug(f"已添加: {file_path}")
+                
+                # 也需要添加 agent.py 的计数
+                file_count += 1  # agent.py
         
         # 计算备份大小
         backup_size = backup_path.stat().st_size
         
-        # 清理旧备份
-        deleted = clean_old_backups(backup_dir)
-        
         # 构建结果
         result_lines = [
-            "✓ 备份创建成功",
+            "备份创建成功",
+            "-" * 40,
             f"文件: {backup_path}",
-            f"大小: {_format_size(backup_size)}",
-            "",
+            f"大小: {format_size(backup_size)}",
+            "-" * 40,
+            "包含:",
+            "  - agent.py",
+            "  - tools/",
             f"版本说明: {version_note or '(无)'}",
-            f"包含文件: {file_count} 个项目",
-        ]
-        
-        if deleted > 0:
-            result_lines.append(f"自动清理: 删除了 {deleted} 个旧备份")
-        
-        result_lines.extend([
+            "-" * 40,
             "",
             "提示: 如需恢复，请解压备份文件到项目目录",
             f"命令: unzip -o {backup_filename}",
-        ])
+        ]
         
         logger.info(f"备份创建成功: {backup_path}")
         return '\n'.join(result_lines)
         
     except PermissionError:
-        return f"错误: 备份创建失败 - 权限不足，请检查 {backup_dir} 目录权限"
+        return f"错误: 权限不足，请检查目录权限 - {backup_dir}"
     except Exception as e:
         logger.error(f"备份创建失败: {e}", exc_info=True)
         return f"错误: 备份创建失败 - {str(e)}"
-
-
-def _format_size(size_bytes: int) -> str:
-    """
-    格式化文件大小。
-    
-    Args:
-        size_bytes: 字节数
-        
-    Returns:
-        格式化的大小字符串
-    """
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} TB"
-
-
-# 导入 re 模块（在 backup_project 中使用）
-import re
