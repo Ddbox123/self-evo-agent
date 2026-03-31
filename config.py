@@ -484,6 +484,16 @@ class AgentConfig:
 
 
 @dataclass
+class ContextCompressionConfig:
+    """运行时上下文压缩配置"""
+    enabled: bool = True
+    max_token_limit: int = 4000
+    keep_recent_steps: int = 2
+    summary_max_chars: int = 200
+    compression_model: str = "qwen-turbo"
+
+
+@dataclass
 class ToolConfig:
     """工具配置"""
     web_search_enabled: bool = True
@@ -554,6 +564,7 @@ class Config:
         # 初始化各模块配置
         self.llm = LLMConfig()
         self.agent = AgentConfig()
+        self.context_compression = ContextCompressionConfig()
         self.tools = ToolConfig()
         self.log = LogConfig()
         self.network = NetworkConfig()

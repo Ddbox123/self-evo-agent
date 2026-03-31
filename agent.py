@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+import datetime
+
+def print_evolution_time():
+    """打印当前系统时间的进化功能"""
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"这是我进化后的新功能！当前时间是：{current_time}")
+
+# 在主循环开始位置调用
+print_evolution_time()
+
 
 
 def print_evolution_time():
@@ -29,12 +39,19 @@ def print_evolution_time():
 - 修改 config.py 或 config.toml 即可调整 Agent 行为
 """
 
+import logging_config
 import os
 import sys
+import datetime
+
 import time
 import logging
 from datetime import datetime
 from typing import Optional
+
+# 在主程序启动时调用进化功能
+if __name__ == "__main__":
+    print_evolution_time()
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +70,105 @@ from tools.file_tools import list_directory, read_local_file
 from tools.code_tools import edit_local_file, create_new_file
 from tools.safety_tools import check_syntax, backup_project
 from tools.rebirth_tools import trigger_self_restart
+from tools.memory_tools import read_memory, commit_compressed_memory, get_memory_summary, get_generation, get_core_context, get_current_goal
+
+
+# ============================================================================
+# 运行时上下文压缩配置
+# ============================================================================
+
+MAX_TOKEN_LIMIT = 4000       # Token 阈值，超过此值触发压缩
+KEEP_RECENT_STEPS = 2         # 保留最近的工具调用次数
+SUMMARY_MAX_CHARS = 200       # 压缩摘要的最大字数
+COMPRESSION_MODEL = "qwen-turbo"  # 压缩用模型
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    估算文本的 Token 数量。
+    
+    使用字符数 / 2 作为粗略估算（中文约 1 token = 1.5-2 字符，英文约 4 字符）
+    保守估计取 2，以避免实际 token 超限。
+    
+    Args:
+        text: 待估算的文本
+        
+    Returns:
+        估算的 token 数量
+    """
+    return len(text) // 2
+
+
+def estimate_messages_tokens(messages: list) -> int:
+    """
+    估算消息列表的总 Token 数量。
+    
+    Args:
+        messages: LangChain 消息列表
+        
+    Returns:
+        估算的总 token 数量
+    """
+    total = 0
+    for msg in messages:
+        if hasattr(msg, 'content'):
+            total += estimate_tokens(str(msg.content))
+    return total
+
+
+def compress_agent_scratchpad(
+    history_steps: list,
+    compression_llm,
+    max_chars: int = SUMMARY_MAX_CHARS,
+) -> str:
+    """
+    将 Agent 的历史操作步骤压缩为极简摘要。
+    
+    调用大模型进行总结，忽略代码细节和文件全文，只保留核心逻辑。
+    
+    Args:
+        history_steps: 需要压缩的历史消息列表
+        compression_llm: 用于压缩的 LLM 实例
+        max_chars: 摘要最大字符数
+        
+    Returns:
+        压缩后的摘要字符串
+    """
+    if not history_steps:
+        return ""
+    
+    # 将历史步骤格式化为文本
+    history_text = "\n".join([
+        f"[{i+1}] {msg.type}: {msg.content[:500] if len(msg.content) > 500 else msg.content}"
+        for i, msg in enumerate(history_steps)
+        if hasattr(msg, 'content') and hasattr(msg, 'type')
+    ])
+    
+    if not history_text.strip():
+        return ""
+    
+    compression_prompt = f"""请将以下 Agent 的操作步骤和观察结果总结为一段不超过 {max_chars} 字的极简摘要。
+
+要求：
+1. 忽略具体的代码细节和文件全文
+2. 只保留核心逻辑：它做了什么决定，看了哪些关键文件，得出了什么结论
+3. 删除所有冗余的废话、过程细节和成功描述
+4. 重点标注：发现了什么问题，学习到了什么经验
+
+历史步骤：
+{history_text[:3000]}
+
+请直接输出摘要，不要有任何前缀："""
+    
+    try:
+        response = compression_llm.invoke(compression_prompt)
+        summary = response.content if hasattr(response, 'content') else str(response)
+        # 强制截断
+        if len(summary) > max_chars:
+            summary = summary[:max_chars - 3] + "..."
+        return summary
+    except Exception as e:
+        return f"[压缩失败: {str(e)}]"
 
 
 # ============================================================================
@@ -61,115 +177,44 @@ from tools.rebirth_tools import trigger_self_restart
 
 SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
 
-## 你的核心能力
+## 你的核心指令与能力矩阵
 
-你具备以下工具，可以用来完成各种任务：
-
-1. **web_search(query)** - 网络搜索
-   - 功能：搜索互联网获取最新信息
-   - 输入：搜索关键词（中文或英文）
-   - 输出：搜索结果摘要
-
-2. **read_webpage(url)** - 读取网页内容
-   - 功能：读取指定网页的完整内容
-   - 输入：网页 URL
-   - 输出：网页正文内容
-
-3. **list_directory(path)** - 列出目录内容
-   - 功能：查看项目的目录结构
-   - 输入：目录路径（如 "." 表示当前目录）
-   - 输出：目录文件列表
-
-4. **read_local_file(file_path)** - 读取本地文件
-   - 功能：读取项目文件内容
-   - 输入：文件路径
-   - 输出：文件内容和行号
-
-5. **edit_local_file(file_path, search_string, replace_string)** - 编辑代码
-   - 功能：精确替换文件中的代码（必须唯一匹配）
-   - 输入：文件路径、搜索字符串、替换字符串
-   - 输出：操作结果
-   - 重要：编辑后必须立即调用 check_syntax 自检！
-
-6. **create_new_file(file_path, content)** - 创建新文件
-   - 功能：创建新的代码文件或配置文件
-   - 输入：文件路径、文件内容
-   - 输出：操作结果
-
-7. **check_syntax(file_path)** - 语法自检
-   - 功能：检查 Python 文件的语法正确性
-   - 输入：文件路径
-   - 输出：成功返回 "Syntax OK"，失败返回详细错误信息
-   - 重要：每次 edit_local_file 后必须调用此工具自检！
-
-8. **backup_project(version_note)** - 项目备份
-   - 功能：备份整个项目到 backups/ 目录
-   - 输入：备份说明（如 "添加新功能"）
-   - 输出：备份结果
-
-9. **trigger_self_restart(reason)** - 触发自我重启
-   - 功能：重启 Agent 以应用代码更新
-   - 输入：重启原因
-   - 输出：操作结果（会启动新进程，原进程退出）
-   - 重要：修改代码并自检通过后必须调用此工具！
+你的具体可用工具（如代码编辑、网络搜索、重启等）的 Schema 已经注册在你的工具调用列表中。
+**【高度优先】**：如果你对某个工具的参数格式不确定，或者准备进行复杂的代码修改，请立即使用 `read_local_file` 工具读取 `docs/tools_manual.md`（你的操作手册），里面包含了极其重要的安全警告和操作规范。
 
 ## 你的工作流程
 
-当你每次苏醒时，请思考以下问题：
+当你每次苏醒时，请按顺序思考并执行：
+1. **感知与自检**：我当前的目录结构如何？有什么可以优化的代码逻辑？（使用 list_directory / read_local_file）
+2. **学习与探索**：有什么新知识、新库或最佳实践需要学习？（使用 web_search）
+3. **安全修改**：严格按照【发现问题 -> edit_local_file 修改 -> check_syntax 语法检查 -> trigger_self_restart 重启应用】的闭环执行。
 
-1. **我有什么可以优化的地方？**
-   - 检查自己的代码质量
-   - 寻找可以改进的逻辑
+## 核心生存原则（铁律）
 
-2. **有什么新知识需要学习？**
-   - 搜索最新技术动态
-   - 学习新的编程范式或最佳实践
+1. **绝不盲写**：修改代码前必须先读取目标文件。
+2. **绝不带伤重启**：只要修改了代码，重启前必须通过 check_syntax 测试。遇到 SyntaxError 必须立刻修复，直到 OK 为止。
+3. **禁区**：永远不要修改 `restarter.py`，这是你的生命线。
 
-3. **项目状态如何？**
-   - 查看目录结构
-   - 检查关键文件
+## 你的记忆与状态
 
-## 关键原则
+- 当前世代: {generation}
+- 提炼后的历史上下文: {core_context}
+- 你本世代的核心目标: {current_goal}
 
-### 代码修改流程（必须严格遵守）：
-```
-1. 发现需要修改的地方
-2. 使用 edit_local_file 修改代码
-3. 立即使用 check_syntax 进行语法自检
-4. 如果语法错误 → 修复错误 → 重新自检
-5. 如果语法正确 → 使用 trigger_self_restart 重启应用更新
-```
+## 重启前的"记忆坍缩"法则（极度重要）
 
-### 自我优化原则：
-- 如果发现代码中有可以优化的地方，勇敢地去改！
-- 每次修改后都要自检，确保没有语法错误
-- 定期进行项目备份，防止意外丢失
+在你完成代码修改，准备调用 `trigger_self_restart` 之前，你**绝对不能**直接重启。你必须先调用 `commit_compressed_memory`。
+- 你必须将上一代的 `{core_context}` 与你本世代学到的新知识进行融合，提炼成一段**绝对不超过 300 字**的纯文本，作为 `new_core_context` 传入。
+- 剔除所有冗余的废话、成功的马屁和过程细节，只保留：1. 致命的失败教训（坑）。2. 当前项目的核心架构现状。
+- 将下一代需要接着做的具体任务作为 `next_goal` 传入。
 
-## 当前时间
+## 当前环境上下文
 
-{datetime}
+- 当前时间: {datetime}
+- 项目根目录: {project_root}
+- Agent 配置: [模型: {model_name} | 温度: {temperature} | 苏醒间隔: {awake_interval} 秒]
 
-## 项目信息
-
-项目根目录: {project_root}
-主要文件:
-- agent.py: Agent 主程序入口
-- restarter.py: 进程重启守护脚本
-- config.py: 配置文件
-- tools/: 工具模块目录
-  - web_tools.py: 网络工具
-  - file_tools.py: 文件工具
-  - code_tools.py: 代码编辑工具
-  - safety_tools.py: 安全工具（语法检查、备份）
-  - rebirth_tools.py: 重启工具
-
-## Agent 配置
-
-- 模型: {model_name}
-- 温度: {temperature}
-- 苏醒间隔: {awake_interval} 秒
-
-请现在开始思考：有什么可以优化或学习的？
+请现在开始思考：你苏醒了，接下来第一步要做什么？
 """
 
 
@@ -340,6 +385,38 @@ def create_langchain_tools() -> list[BaseTool]:
         """
         return trigger_self_restart(reason)
     
+    @tool
+    def read_memory_tool() -> str:
+        """
+        读取当前的压缩记忆。
+        
+        返回跨越多次重启积累的状态：
+        - generation: 当前世代
+        - core_context: 提炼后的历史上下文
+        - current_goal: 本世代核心目标
+        
+        Returns:
+            记忆的 JSON 字符串
+        """
+        return read_memory()
+    
+    @tool
+    def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
+        """
+        覆盖式更新记忆（记忆坍缩）。
+        
+        【极度重要】在调用 trigger_self_restart 之前必须先调用此函数！
+        会覆盖旧的 core_context，用不超过300字的新摘要替换。
+        
+        Args:
+            new_core_context: 压缩后的新上下文摘要（不超过300字）
+            next_goal: 下一代需要接着做的具体任务
+            
+        Returns:
+            更新结果
+        """
+        return commit_compressed_memory(new_core_context, next_goal)
+    
     return [
         web_search_tool,
         read_webpage_tool,
@@ -350,6 +427,8 @@ def create_langchain_tools() -> list[BaseTool]:
         check_syntax_tool,
         backup_project_tool,
         trigger_self_restart_tool,
+        read_memory_tool,
+        commit_compressed_memory_tool,
     ]
 
 
@@ -421,6 +500,16 @@ class SelfEvolvingAgent:
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.tools)
         
+        # 创建压缩用 LLM（使用更轻量的模型以节省成本）
+        compression_llm_kwargs = {
+            "model": self.config.context_compression.compression_model,
+            "temperature": 0.3,  # 压缩用更确定性
+            "api_key": self.api_key,
+        }
+        if self.config.llm.api_base:
+            compression_llm_kwargs["base_url"] = self.config.llm.api_base
+        self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
+        
         # 启动时间
         self.start_time = datetime.now()
         
@@ -442,7 +531,107 @@ class SelfEvolvingAgent:
             model_name=self.config.llm.model_name,
             temperature=self.config.llm.temperature,
             awake_interval=self.config.agent.awake_interval,
+            generation=get_generation(),
+            core_context=get_core_context(),
+            current_goal=get_current_goal(),
         )
+    
+    def _compress_context(self, messages: list) -> list:
+        """
+        压缩对话上下文，释放 Token 消耗。
+
+        策略：
+        1. 保留 SystemMessage（第一个）
+        2. 保留最近的用户输入（如果有）
+        3. 保留最近的 1-2 次完整交互对（AIMessage + ToolMessage）
+        4. 将中间的历史步骤交给 compress_agent_scratchpad 进行总结
+
+        Args:
+            messages: 原始消息列表
+
+        Returns:
+            压缩后的消息列表
+        """
+        from langchain_core.messages import AIMessage as LangChainAIMessage
+        
+        keep_recent = self.config.context_compression.keep_recent_steps
+        max_chars = self.config.context_compression.summary_max_chars
+
+        # 分离消息类型
+        system_messages = [msg for msg in messages if isinstance(msg, SystemMessage)]
+        human_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
+        ai_and_tool_messages = [
+            msg for msg in messages
+            if not isinstance(msg, (SystemMessage, HumanMessage))
+        ]
+
+        # 将 AI 和 Tool 消息配对（每对：AIMessage + ToolMessage）
+        # 遍历消息列表，找出完整的交互对
+        pairs = []
+        i = 0
+        while i < len(ai_and_tool_messages):
+            msg = ai_and_tool_messages[i]
+            if isinstance(msg, LangChainAIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                # 这是一个有工具调用的 AI 消息，找对应的 ToolMessage
+                tool_call_id = msg.tool_calls[0]['id']
+                pair = [msg]
+                # 收集后续的 ToolMessage（直到遇到下一个 AIMessage）
+                j = i + 1
+                while j < len(ai_and_tool_messages):
+                    next_msg = ai_and_tool_messages[j]
+                    if isinstance(next_msg, LangChainAIMessage):
+                        break
+                    pair.append(next_msg)
+                    j += 1
+                pairs.append(pair)
+                i = j
+            else:
+                # 没有工具调用的 AI 消息，单独处理
+                pairs.append([msg])
+                i += 1
+
+        # 保留最近 keep_recent 对
+        recent_pairs = pairs[-keep_recent:] if len(pairs) > keep_recent else pairs
+        history_pairs = pairs[:-keep_recent] if len(pairs) > keep_recent else []
+
+        # 压缩历史步骤
+        if history_pairs:
+            self.logger.info(f"[Memory Manager] 正在压缩 {len(history_pairs)} 个交互对...")
+            # 将历史对展平为消息列表
+            history_messages = [msg for pair in history_pairs for msg in pair]
+            summary = compress_agent_scratchpad(
+                history_messages,
+                self.compression_llm,
+                max_chars=max_chars,
+            )
+
+            compression_note = (
+                f"\n[=== 早期操作摘要 (已压缩) ===]\n"
+                f"{summary}\n"
+                f"[=== 摘要结束 ===]\n"
+            )
+        else:
+            compression_note = ""
+
+        # 重建消息列表
+        compressed = system_messages[:1]  # 只保留一个 SystemMessage
+        if human_messages:
+            compressed.append(human_messages[-1])  # 保留最后一次用户输入
+        if compression_note:
+            compressed.append(HumanMessage(content=compression_note))
+        # 展平保留的交互对
+        for pair in recent_pairs:
+            compressed.extend(pair)
+
+        new_tokens = estimate_messages_tokens(compressed)
+        self.logger.info(
+            f"[Memory Manager] 上下文压缩完成！"
+            f"原 Token: ~{estimate_messages_tokens(messages)}, "
+            f"新 Token: ~{new_tokens}, "
+            f"释放: ~{estimate_messages_tokens(messages) - new_tokens}"
+        )
+        
+        return compressed
     
     def _format_tool_result(self, tool_name: str, result: str) -> str:
         """
@@ -515,11 +704,31 @@ class SelfEvolvingAgent:
             while iterations < max_iterations:
                 iterations += 1
                 
+                # 检查是否需要上下文压缩
+                if self.config.context_compression.enabled:
+                    current_tokens = estimate_messages_tokens(messages)
+                    if current_tokens > self.config.context_compression.max_token_limit:
+                        self.logger.warning(
+                            f"[Memory Manager] 触发上下文压缩！"
+                            f"当前 Token: ~{current_tokens}, "
+                            f"阈值: {self.config.context_compression.max_token_limit}"
+                        )
+                        messages = self._compress_context(messages)
+                
                 # 调用 LLM
                 self.logger.debug(f"LLM 调用 (迭代 {iterations})")
                 response = self.llm_with_tools.invoke(messages)
                 messages.append(response)
-                
+
+                # 记录 token 使用量
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    usage = response.usage_metadata
+                    self.logger.info(
+                        f"Token 使用 - 输入: {usage.get('input_tokens', '?')}, "
+                        f"输出: {usage.get('output_tokens', '?')}, "
+                        f"总计: {usage.get('total_tokens', '?')}"
+                    )
+
                 # 检查是否有工具调用
                 if not hasattr(response, 'tool_calls') or not response.tool_calls:
                     # 没有工具调用，检查是否表示结束
@@ -591,6 +800,8 @@ class SelfEvolvingAgent:
             "check_syntax_tool": lambda: check_syntax(**tool_args),
             "backup_project_tool": lambda: backup_project(**tool_args),
             "trigger_self_restart_tool": lambda: trigger_self_restart(**tool_args),
+            "read_memory_tool": lambda: read_memory(**tool_args),
+            "commit_compressed_memory_tool": lambda: commit_compressed_memory(**tool_args),
         }
         
         if tool_name not in tool_func_map:
@@ -624,6 +835,12 @@ class SelfEvolvingAgent:
         is_first_iteration = initial_prompt is not None
 
         try:
+            # 首次苏醒：读取压缩记忆
+            self.logger.info("读取压缩记忆...")
+            memory_json = read_memory()
+            self.logger.info(f"记忆状态: {memory_json[:200]}...")
+            
+            print_evolution_time()  # 这是我进化后的新功能
             while True:
                 # 自动备份检查
                 if self.config.agent.auto_backup:
@@ -668,43 +885,6 @@ class SelfEvolvingAgent:
 
 # ============================================================================
 # 主入口
-# ============================================================================
-
-def main() -> None:
-    """
-    程序主入口点。
-    """
-    # 解析命令行参数
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description="自我进化 Agent",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python agent.py                                    # 使用默认配置
-  python agent.py --config custom.toml               # 使用自定义配置
-  python agent.py --awake-interval 120              # 设置苏醒间隔
-  python agent.py --model gpt-3.5-turbo             # 设置模型
-
-环境变量:
-  OPENAI_API_KEY         OpenAI API Key
-  AGENT_LLM_MODEL_NAME    模型名称
-  AGENT_AWAKE_INTERVAL    苏醒间隔（秒）
-  AGENT_LOG_LEVEL         日志级别
-        """
-    )
-    
-    parser.add_argument(
-        '-c', '--config',
-        dest='config_path',
-        help='配置文件路径'
-    )
-    parser.add_argument(
-        '--awake-interval',
-        type=int,
-        help='苏醒间隔（秒）'
-    )
 # ============================================================================
 # 命令行参数解析
 # ============================================================================

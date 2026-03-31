@@ -1,0 +1,14 @@
+# 日志配置模块
+import logging
+
+LOG_LEVEL = "DEBUG"
+
+# 标准化日志格式
+def setup_logger():
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+setup_logger()

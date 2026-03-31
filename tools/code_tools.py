@@ -86,27 +86,30 @@ def is_editable(file_path: str) -> bool:
 def create_backup(file_path: str) -> Optional[str]:
     """
     在编辑前创建文件的备份。
-    
+
     Args:
         file_path: 要备份的文件路径
-        
+
     Returns:
         备份文件的路径，失败返回 None
     """
     try:
         abs_path = Path(file_path).resolve()
-        backup_path = abs_path.with_suffix(abs_path.suffix + '.bak')
-        
-        # 如果备份已存在，添加时间戳
-        if backup_path.exists():
-            import datetime
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_path = abs_path.with_suffix(f'.{timestamp}.bak')
-        
+
+        # 创建备份文件夹（如果不存在）
+        backup_dir = abs_path.parent / "backups"
+        backup_dir.mkdir(exist_ok=True)
+
+        # 备份文件名保持原名
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = f"{abs_path.stem}_{timestamp}{abs_path.suffix}"
+        backup_path = backup_dir / backup_name
+
         shutil.copy2(abs_path, backup_path)
         logger.debug(f"已创建备份: {backup_path}")
         return str(backup_path)
-        
+
     except Exception as e:
         logger.error(f"创建备份失败: {e}")
         return None
