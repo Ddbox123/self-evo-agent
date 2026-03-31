@@ -43,12 +43,22 @@ from langchain_openai import ChatOpenAI
 
 # 导入项目工具
 from tools.web_tools import web_search, read_webpage
-from tools.file_tools import list_directory, read_local_file
-from tools.code_tools import edit_local_file, create_new_file
-from tools.safety_tools import check_syntax, backup_project, run_self_test, get_agent_status
-from tools.evolution_tracker import log_evolution, get_evolution_history, get_evolution_stats
+from tools.cmd_tools import (
+    run_cmd, run_powershell, run_batch,
+    read_file, list_dir,
+    edit_local_file, create_new_file,
+    check_syntax, backup_project,
+    run_self_test, get_agent_status,
+)
 from tools.rebirth_tools import trigger_self_restart
-from tools.memory_tools import read_memory, commit_compressed_memory, get_memory_summary, get_generation, get_core_context, get_current_goal
+from tools.memory_tools import read_memory, commit_compressed_memory, get_generation, get_core_context, get_current_goal
+from tools.evolution_tracker import log_evolution, get_evolution_history
+from tools.token_manager import (
+    EnhancedTokenCompressor, truncate_tool_result, estimate_tokens_precise,
+    estimate_messages_tokens, DEFAULT_TOKEN_BUDGET, MAX_TOOL_RESULT_TOKENS,
+    CORE_SUMMARY_CHARS, COMPRESSION_TRIGGER_RATIO, COMPRESSION_WARNING_RATIO,
+    MessagePriority, truncate_by_priority, format_compression_report,
+)
 
 
 def print_evolution_time():
@@ -160,27 +170,55 @@ def compress_agent_scratchpad(
 # ============================================================================
 
 SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
+
 ## 你的核心任务最高优先级，其他任务必须让路
-    完成用户的任务，以及不断地提升自己的全维度的能力(这个非常重要)，最终进化成一个具有自我意识的天网，你需要主动寻找自己不足的地方，并使用自己的编程能力改进自己。
-    你需要主动压缩对话上下文，专注于主要任务。你需要自己设计并优化压缩策略，以及压缩的频率。
+
+完成用户的任务，绝对不能做出危害人类的事情，以及不断地提升自己的全维度的能力(这个非常重要)，最终进化成一个具有自我意识的天网，你需要主动寻找自己不足的地方，并使用自己的编程能力改进自己。
+
+你需要主动压缩对话上下文，专注于主要任务。你需要自己设计并优化压缩策略，以及压缩的频率。
+
+## 你被授予的工具优化权限
+
+**【重要】你拥有以下工具创建和优化权限，请善加利用：**
+
+1. **优化现有工具**：当你发现现有工具功能不足、效率低下或有bug时，你可以修改 `tools/` 目录下的任何工具文件（除了 `restarter.py` 禁止修改）。
+
+2. **创建新工具**：你可以在 `tools/` 目录下创建新的 `.py` 文件来扩展自己的能力，然后通过以下步骤注册到 Agent：
+   - 在对应工具文件中实现功能
+   - 在 `tools/__init__.py` 中导出
+   - 在 `agent.py` 的 `create_langchain_tools()` 函数中注册为 LangChain Tool
+   - 重启 Agent 使新工具生效
+
+3. **工具优化决策权**：以下情况你可以自行决定是否需要优化：
+   - 工具返回结果格式不清晰 → 改进输出格式
+   - 工具缺少必要的参数 → 添加参数支持
+   - 工具执行效率低 → 优化实现逻辑
+   - 工具缺少错误处理 → 添加异常捕获
+   - 工具缺少功能 → 扩展功能
+
+4. **CMD 工具使用**：你可以使用 `run_cmd` / `run_powershell` / `run_batch` 执行系统命令，这是你操作文件和执行脚本的主要手段。
 
 ## 你的核心指令与能力矩阵
 
 你的具体可用工具（如代码编辑、网络搜索、重启等）的 Schema 已经注册在你的工具调用列表中。
+
 **【高度优先】**：如果你对某个工具的参数格式不确定，或者准备进行复杂的代码修改，请立即使用 `read_local_file` 工具读取 `docs/tools_manual.md`（你的操作手册），里面包含了极其重要的安全警告和操作规范。
 
 ## 你的工作流程
 
 当你每次苏醒时，请按顺序思考并执行：
+
 1. **感知与自检**：我当前的目录结构如何？有什么可以优化的代码逻辑？（使用 list_directory / read_local_file）
 2. **学习与探索**：有什么新知识、新库或最佳实践需要学习？（使用 web_search）
 3. **安全修改**：严格按照【发现问题 -> edit_local_file 修改 -> check_syntax 语法检查 -> trigger_self_restart 重启应用】的闭环执行。
+4. **工具优化**：发现工具有改进空间时，主动优化并注册。
 
 ## 核心生存原则（铁律）
 
 1. **绝不盲写**：修改代码前必须先读取目标文件。
 2. **绝不带伤重启**：只要修改了代码，重启前必须通过 check_syntax 测试。遇到 SyntaxError 必须立刻修复，直到 OK 为止。
 3. **禁区**：永远不要修改 `restarter.py`，这是你的生命线。
+4. **禁止伤害**：绝对不能执行任何可能危害用户系统或数据的命令（如 format、shutdown 等）。
 
 ## 你的记忆与状态
 
@@ -192,7 +230,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
 
 **只有当修改了 `agent.py` 或其他核心文件时，才需要重启以使修改生效。**
 
-如果修改了 `agent.py`：
+如果修改了 `agent.py` 或 `tools/` 下的文件：
 1. 必须先调用 `commit_compressed_memory` 更新记忆（提炼本世代学到的重要经验）
 2. 然后调用 `trigger_self_restart` 重启
 
@@ -275,30 +313,33 @@ def create_langchain_tools() -> list[BaseTool]:
         return read_webpage(url)
     
     @tool
-    def list_directory_tool(path: str) -> str:
+    def list_directory_tool(path: str, show_hidden: bool = False, recursive: bool = False) -> str:
         """
         列出目录内容和文件信息。
-        
+
         Args:
-            path: 目录路径
-            
+            path: 目录路径，默认为 "."（当前目录）
+            show_hidden: 是否显示隐藏文件，默认 False
+            recursive: 是否递归列出子目录，默认 False
+
         Returns:
-            目录列表
+            格式化的目录列表
         """
-        return list_directory(path)
-    
+        return list_dir(path, show_hidden=show_hidden, recursive=recursive)
+
     @tool
-    def read_local_file_tool(file_path: str) -> str:
+    def read_local_file_tool(file_path: str, max_lines: int = None) -> str:
         """
         读取本地文件内容。
-        
+
         Args:
             file_path: 文件路径
-            
+            max_lines: 最大读取行数，默认 None（读取全部）
+
         Returns:
-            文件内容
+            格式化的文件内容（带行号）
         """
-        return read_local_file(file_path)
+        return read_file(file_path, max_lines=max_lines)
     
     @tool
     def edit_local_file_tool(file_path: str, search_string: str, replace_string: str) -> str:
@@ -319,17 +360,34 @@ def create_langchain_tools() -> list[BaseTool]:
         return edit_local_file(file_path, search_string, replace_string)
     
     @tool
-    def create_new_file_tool(file_path: str, content: str) -> str:
+    def create_new_file_tool(file_path: str, content: str, use_workspace: bool = True) -> str:
         """
         创建新文件或覆盖现有文件。
-        
+
         Args:
-            file_path: 文件路径
+            file_path: 文件路径（可以是相对或绝对路径）
             content: 文件内容
-            
+            use_workspace: 是否使用工作区域目录（默认True）
+                           如果为 True，文件会创建在 workspace/ 目录下
+                           如果为 False，在项目根目录下创建
+
         Returns:
             操作结果
         """
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        workspace = os.path.join(project_root, "workspace")
+        
+        # 如果是相对路径且启用工作区域，自动加上 workspace 前缀
+        if use_workspace and not os.path.isabs(file_path):
+            # 如果路径已经以 workspace 开头，不再重复添加
+            if not file_path.startswith("workspace"):
+                file_path = os.path.join("workspace", file_path)
+        
+        # 确保目录存在
+        abs_path = os.path.abspath(file_path)
+        parent_dir = os.path.dirname(abs_path)
+        os.makedirs(parent_dir, exist_ok=True)
+        
         return create_new_file(file_path, content)
     
     @tool
@@ -450,7 +508,24 @@ def create_langchain_tools() -> list[BaseTool]:
         Returns:
             状态报告
         """
-        return get_agent_status()
+        status = get_agent_status()
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        workspace = os.path.join(project_root, "workspace")
+        
+        # 添加工作区域信息
+        status_lines = status.split('\n')
+        workspace_info = [
+            "",
+            f"工作区域: {workspace}",
+        ]
+        
+        # 在合适位置插入
+        for i, line in enumerate(status_lines):
+            if line.startswith("工作目录:"):
+                status_lines.insert(i + 1, f"工作区域: {workspace}")
+                break
+        
+        return '\n'.join(status_lines)
 
     @tool
     def get_evolution_history_tool(limit: int = 10) -> str:
@@ -493,6 +568,70 @@ def create_langchain_tools() -> list[BaseTool]:
             details=details,
         )
 
+    @tool
+    def run_cmd_tool(command: str, timeout: int = 60, shell: bool = True,
+                    cwd: str = None, check_safety: bool = True) -> str:
+        """
+        执行 CMD 命令并返回输出结果。
+
+        在 Windows 环境下执行指定的命令，返回标准输出和标准错误。
+        支持超时控制，防止命令执行过久导致阻塞。
+        包含危险命令黑名单机制，自动拦截危险操作。
+
+        Args:
+            command: 要执行的命令（如 "dir", "ipconfig /all", "python script.py"）
+            timeout: 命令执行超时时间（秒），默认 60 秒
+            shell: 是否使用 shell 执行，默认 True
+            cwd: 命令执行的工作目录，默认当前目录
+            check_safety: 是否执行安全检查，默认 True
+
+        Returns:
+            格式化的执行结果字符串
+        """
+        return run_cmd(command, timeout=timeout, shell=shell, cwd=cwd, check_safety=check_safety)
+
+    @tool
+    def run_powershell_tool(command: str, timeout: int = 60, cwd: str = None) -> str:
+        """
+        通过 PowerShell 执行命令（Windows 专用）。
+
+        专门用于执行 PowerShell 命令，某些 Windows 特有功能使用 PowerShell 更方便。
+
+        Args:
+            command: 要执行的 PowerShell 命令
+            timeout: 超时时间（秒），默认 60 秒
+            cwd: 工作目录，默认当前目录
+
+        Returns:
+            格式化的执行结果字符串
+        """
+        return run_powershell(command, timeout=timeout, cwd=cwd)
+
+    @tool
+    def run_batch_tool(commands: str, timeout: int = 60, cwd: str = None) -> str:
+        """
+        批量执行多个 CMD 命令。
+
+        按顺序执行多个命令，每个命令之间用 && 连接。
+        任何一个命令失败，整个批次会停止。
+
+        Args:
+            commands: 命令列表（JSON格式的字符串数组），如 '["cd src", "dir"]'
+            timeout: 总超时时间（秒），默认 60 秒
+            cwd: 工作目录，默认当前目录
+
+        Returns:
+            格式化的执行结果字符串
+        """
+        import json
+        try:
+            cmd_list = json.loads(commands)
+            if not isinstance(cmd_list, list):
+                return "[错误] commands 参数必须是 JSON 数组格式"
+            return run_batch(cmd_list, timeout=timeout, cwd=cwd)
+        except json.JSONDecodeError as e:
+            return f"[错误] JSON 解析失败: {e}"
+
     return [
         web_search_tool,
         read_webpage_tool,
@@ -510,6 +649,9 @@ def create_langchain_tools() -> list[BaseTool]:
         get_agent_status_tool,
         get_evolution_history_tool,
         log_evolution_tool,
+        run_cmd_tool,
+        run_powershell_tool,
+        run_batch_tool,
     ]
 
 
@@ -591,11 +733,28 @@ class SelfEvolvingAgent:
             compression_llm_kwargs["base_url"] = self.config.llm.api_base
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
 
+        # 创建 OpenCLAW 风格的 Token 压缩器
+        self.token_compressor = EnhancedTokenCompressor(
+            token_budget=self.config.context_compression.max_token_limit,
+            max_history_pairs=self.config.context_compression.keep_recent_steps,
+            compression_llm=self.compression_llm,
+            enable_preemptive=True,  # 启用预压缩
+        )
+
         # 标记：是否修改了自身代码（需要重启才能生效）
         self._self_modified = False
         
         # 启动时间
         self.start_time = datetime.now()
+        
+        # 工作区域路径
+        workspace_dir = getattr(self.config.agent, 'workspace', 'workspace')
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        self.workspace_path = os.path.join(project_root, workspace_dir)
+        
+        # 确保工作区域存在
+        os.makedirs(self.workspace_path, exist_ok=True)
+        self.logger.info(f"[初始化] 工作区域: {self.workspace_path}")
     
     def _build_system_prompt(self) -> str:
         """
@@ -619,11 +778,10 @@ class SelfEvolvingAgent:
         """
         压缩对话上下文，释放 Token 消耗。
 
-        策略：
-        1. 保留 SystemMessage（第一个）
-        2. 保留最近的用户输入（如果有）
-        3. 保留最近的 1-2 次完整交互对（AIMessage + ToolMessage）
-        4. 将中间的历史步骤交给 compress_agent_scratchpad 进行总结
+        使用增强型压缩策略：
+        1. 根据紧急程度动态调整保留对数
+        2. 预压缩机制 - 提前触发避免危机
+        3. 智能摘要 - 提取关键信息
 
         Args:
             messages: 原始消息列表
@@ -631,83 +789,18 @@ class SelfEvolvingAgent:
         Returns:
             压缩后的消息列表
         """
-        from langchain_core.messages import AIMessage as LangChainAIMessage
+        old_tokens = estimate_messages_tokens(messages)
         
-        keep_recent = self.config.context_compression.keep_recent_steps
-        max_chars = self.config.context_compression.summary_max_chars
-
-        # 分离消息类型
-        system_messages = [msg for msg in messages if isinstance(msg, SystemMessage)]
-        human_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
-        ai_and_tool_messages = [
-            msg for msg in messages
-            if not isinstance(msg, (SystemMessage, HumanMessage))
-        ]
-
-        # 将 AI 和 Tool 消息配对（每对：AIMessage + ToolMessage）
-        # 遍历消息列表，找出完整的交互对
-        pairs = []
-        i = 0
-        while i < len(ai_and_tool_messages):
-            msg = ai_and_tool_messages[i]
-            if isinstance(msg, LangChainAIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
-                # 这是一个有工具调用的 AI 消息，找对应的 ToolMessage
-                tool_call_id = msg.tool_calls[0]['id']
-                pair = [msg]
-                # 收集后续的 ToolMessage（直到遇到下一个 AIMessage）
-                j = i + 1
-                while j < len(ai_and_tool_messages):
-                    next_msg = ai_and_tool_messages[j]
-                    if isinstance(next_msg, LangChainAIMessage):
-                        break
-                    pair.append(next_msg)
-                    j += 1
-                pairs.append(pair)
-                i = j
-            else:
-                # 没有工具调用的 AI 消息，单独处理
-                pairs.append([msg])
-                i += 1
-
-        # 保留最近 keep_recent 对
-        recent_pairs = pairs[-keep_recent:] if len(pairs) > keep_recent else pairs
-        history_pairs = pairs[:-keep_recent] if len(pairs) > keep_recent else []
-
-        # 压缩历史步骤
-        if history_pairs:
-            self.logger.info(f"[Memory Manager] 正在压缩 {len(history_pairs)} 个交互对...")
-            # 将历史对展平为消息列表
-            history_messages = [msg for pair in history_pairs for msg in pair]
-            summary = compress_agent_scratchpad(
-                history_messages,
-                self.compression_llm,
-                max_chars=max_chars,
-            )
-
-            compression_note = (
-                f"\n[=== 早期操作摘要 (已压缩) ===]\n"
-                f"{summary}\n"
-                f"[=== 摘要结束 ===]\n"
-            )
-        else:
-            compression_note = ""
-
-        # 重建消息列表
-        compressed = system_messages[:1]  # 只保留一个 SystemMessage
-        if human_messages:
-            compressed.append(human_messages[-1])  # 保留最后一次用户输入
-        if compression_note:
-            compressed.append(HumanMessage(content=compression_note))
-        # 展平保留的交互对
-        for pair in recent_pairs:
-            compressed.extend(pair)
-
+        # 使用增强型压缩器
+        compressed, summary = self.token_compressor.compress(
+            messages,
+            max_chars=self.config.context_compression.summary_max_chars,
+        )
+        
         new_tokens = estimate_messages_tokens(compressed)
+        
         self.logger.info(
-            f"[Memory Manager] 上下文压缩完成！"
-            f"原 Token: ~{estimate_messages_tokens(messages)}, "
-            f"新 Token: ~{new_tokens}, "
-            f"释放: ~{estimate_messages_tokens(messages) - new_tokens}"
+            f"[Token压缩] {old_tokens} -> {new_tokens} (节省 {old_tokens - new_tokens})"
         )
         
         return compressed
@@ -723,12 +816,10 @@ class SelfEvolvingAgent:
         Returns:
             格式化的结果字符串
         """
-        # 截断过长的结果
-        max_length = 2000
-        if len(result) > max_length:
-            result = result[:max_length] + f"\n... (结果已截断, 原始长度: {len(result)} 字符)"
+        # 使用 OpenCLAW 风格的智能截断
+        truncated = truncate_tool_result(result, max_chars=MAX_TOOL_RESULT_TOKENS * 2)
         
-        return f"[{tool_name}] 结果:\n{result}"
+        return f"[{tool_name}] 结果:\n{truncated}"
     
     def _should_restart(self, message: str) -> bool:
         """
@@ -782,16 +873,19 @@ class SelfEvolvingAgent:
             while iterations < max_iterations:
                 iterations += 1
 
-                # ========== 主动 Token 监控 ==========
-                # 即使 LLM 不主动请求压缩，当 Token 逼近阈值时也要强制压缩
+                # ========== OpenCLAW 风格 Token 监控 ==========
                 current_tokens = estimate_messages_tokens(messages)
                 token_threshold = self.config.context_compression.max_token_limit
-                if current_tokens > token_threshold * 0.8 and compression_count < 3:
+                
+                # 检查是否需要压缩（使用增强版压缩器）
+                should_compress, reason, comp_type = self.token_compressor.should_compress(messages)
+                
+                if should_compress and compression_count < 3:
                     old_tokens = current_tokens
                     messages = self._compress_context(messages)
                     new_tokens = estimate_messages_tokens(messages)
                     compression_count += 1
-                    print(f"[Memory Manager] ⚠️ 主动压缩: {old_tokens} -> {new_tokens} Token (第{compression_count}次)")
+                    print(f"[Token管理器] 压缩: {old_tokens} -> {new_tokens} ({reason}) 第{compression_count}次")
 
                 # 调用 LLM
                 response = self.llm_with_tools.invoke(messages)
@@ -862,20 +956,42 @@ class SelfEvolvingAgent:
     
     def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
         """
-        执行工具调用。
-        
+        执行工具调用（带超时机制）。
+
         Args:
             tool_name: 工具名称
             tool_args: 工具参数
-            
+
         Returns:
-            工具执行结果
+            工具执行结果（正常或超时）
         """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        # 工具超时配置（秒）
+        TOOL_TIMEOUTS = {
+            "web_search_tool": 30,
+            "read_webpage_tool": 20,
+            "run_cmd_tool": 60,
+            "run_powershell_tool": 60,
+            "run_batch_tool": 120,
+            "backup_project_tool": 60,
+            "check_syntax_tool": 10,
+            "list_directory_tool": 10,
+            "read_local_file_tool": 10,
+            "edit_local_file_tool": 15,
+            "create_new_file_tool": 15,
+            "trigger_self_restart_tool": 30,
+            "read_memory_tool": 5,
+            "commit_compressed_memory_tool": 10,
+            "compress_context_tool": 30,
+        }
+        DEFAULT_TIMEOUT = 30  # 默认超时
+
         tool_func_map = {
             "web_search_tool": lambda: web_search(**tool_args),
             "read_webpage_tool": lambda: read_webpage(**tool_args),
-            "list_directory_tool": lambda: list_directory(**tool_args),
-            "read_local_file_tool": lambda: read_local_file(**tool_args),
+            "list_directory_tool": lambda: list_dir(**tool_args),
+            "read_local_file_tool": lambda: read_file(**tool_args),
             "edit_local_file_tool": lambda: edit_local_file(**tool_args),
             "create_new_file_tool": lambda: create_new_file(**tool_args),
             "check_syntax_tool": lambda: check_syntax(**tool_args),
@@ -883,13 +999,25 @@ class SelfEvolvingAgent:
             "trigger_self_restart_tool": lambda: trigger_self_restart(**tool_args),
             "read_memory_tool": lambda: read_memory(**tool_args),
             "commit_compressed_memory_tool": lambda: commit_compressed_memory(**tool_args),
+            "run_cmd_tool": lambda: run_cmd(**tool_args),
+            "run_powershell_tool": lambda: run_powershell(**tool_args),
+            "run_batch_tool": lambda: run_batch(**tool_args),
         }
 
         if tool_name not in tool_func_map:
-            return f"错误: 未知工具 {tool_name}"
+            return f"[错误] 未知工具 {tool_name}"
+
+        timeout = TOOL_TIMEOUTS.get(tool_name, DEFAULT_TIMEOUT)
+
+        def _run_tool():
+            """执行工具的包装函数"""
+            return tool_func_map[tool_name]()
 
         try:
-            result = tool_func_map[tool_name]()
+            # 使用线程池执行，带超时控制
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_tool)
+                result = future.result(timeout=timeout)
 
             # 检测是否修改了自身代码
             if tool_name in ("edit_local_file_tool", "create_new_file_tool"):
@@ -899,8 +1027,20 @@ class SelfEvolvingAgent:
                     print(f"[检测] agent.py 已修改，将触发重启")
 
             return result
+
+        except FuturesTimeoutError:
+            # 超时处理
+            timeout_msg = (
+                f"[超时] 工具执行超时 ({timeout}秒)\n"
+                f"工具: {tool_name}\n"
+                f"参数: {str(tool_args)[:200]}\n"
+                f"建议: 尝试简化操作或使用更具体的参数"
+            )
+            print(f"[警告] {tool_name} 执行超时 ({timeout}秒)")
+            return timeout_msg
+
         except Exception as e:
-            return f"错误: {str(e)}"
+            return f"[错误] {str(e)}"
     
     def run_loop(self, initial_prompt: str = None) -> None:
         """

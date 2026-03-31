@@ -1,26 +1,167 @@
 # 自我进化 Agent - 工具操作手册
 
+## 【工具优化与扩展指南】
+
+作为自我进化的 Agent，你被授权可以优化和扩展自己的工具能力。
+
+### 何时应该优化工具
+
+- 工具返回结果格式不清晰或难以解析
+- 工具缺少必要的参数支持
+- 工具执行效率低下
+- 工具缺少错误处理，容易崩溃
+- 工具功能不完整，无法满足需求
+
+### 如何优化现有工具
+
+1. 使用 `read_local_file` 读取目标工具文件（如 `tools/xxx_tools.py`）
+2. 分析代码找出改进点
+3. 使用 `edit_local_file` 进行修改
+4. 使用 `check_syntax` 验证语法
+5. 如需生效，更新 `agent.py` 中的注册代码并重启
+
+### 如何创建新工具
+
+1. 在 `tools/` 目录下创建新的 `.py` 文件（如 `my_tool.py`）
+2. 实现工具函数和文档字符串
+3. 在 `tools/__init__.py` 中添加导出
+4. 在 `agent.py` 的 `create_langchain_tools()` 中注册
+
+```python
+# 示例：在 agent.py 中注册新工具
+@tool
+def my_new_tool(param: str) -> str:
+    """
+    新工具描述...
+    """
+    from tools.my_tool import my_function
+    return my_function(param)
+
+# 在工具列表中添加
+return [
+    # ... 其他工具 ...
+    my_new_tool,
+]
+```
+
+5. 调用 `trigger_self_restart` 重启使新工具生效
+
+---
+
 ## 【核心安全铁律】
 
 1. **绝不盲写**：修改任何代码前，必须先用 `read_local_file` 读取原文件。
 2. **绝不带伤重启**：`edit_local_file` 后，必须立即调用 `check_syntax`；仅当返回 `"Syntax OK"` 才可 `trigger_self_restart`。
 3. **记忆坍缩前置**：每次 `trigger_self_restart` 前，必须先调用 `commit_compressed_memory`，`new_core_context` ≤300字，仅保留致命教训与当前架构现状。
 4. **禁区**：`restarter.py` 绝对不可修改！
+5. **工作区域隔离**：所有生成的文件默认放在 `workspace/` 目录下，防止污染项目代码
 
 ---
 
-## 【文件操作工具】
+## 【工作区域机制】
+
+Agent 生成的所有文件默认存放在指定的工作区域内。
+
+### 配置
+
+在 `config.toml` 中配置：
+
+```toml
+[agent]
+workspace = "workspace"  # 工作区域目录（相对于项目根目录）
+```
+
+### 工作原理
+
+| 工具 | 行为 |
+|------|------|
+| `create_new_file_tool` | 默认在 `workspace/` 下创建文件 |
+| `edit_local_file_tool` | 编辑项目文件（agent.py, tools/ 等） |
+| `read_local_file_tool` | 可读取任何位置的文件 |
+
+### 目录结构
+
+```
+self-evo-agent/
+├── agent.py          # Agent 核心代码
+├── config.toml       # 配置文件
+├── tools/            # 工具模块
+├── restarter.py      # 重启器（禁止修改）
+├── workspace/        # Agent 工作区域（生成的文件）
+│   ├── project1/     # 项目1
+│   ├── project2/     # 项目2
+│   └── output/       # 输出文件
+```
+
+### 优点
+
+1. **隔离**：生成的内容与核心代码分离
+2. **清理**：可以随时删除整个 `workspace/` 目录
+3. **整洁**：不会因为生成测试文件而污染项目
+
+---
+
+## 【工具执行超时机制】
+
+每个工具都有最大执行时间限制，超过后返回超时错误给模型。
+
+### 超时配置
+
+| 工具类型 | 超时时间 | 说明 |
+|---------|---------|------|
+| `run_batch_tool` | 120秒 | 批量命令可能较长 |
+| `run_cmd_tool` | 60秒 | 系统命令 |
+| `run_powershell_tool` | 60秒 | PowerShell命令 |
+| `backup_project_tool` | 60秒 | 备份可能较大项目 |
+| `web_search_tool` | 30秒 | 网络搜索 |
+| `compress_context_tool` | 30秒 | 上下文压缩 |
+| `trigger_self_restart_tool` | 30秒 | 重启操作 |
+| `read_webpage_tool` | 20秒 | 网页读取 |
+| 其他 | 30秒 | 默认超时 |
+
+### 超时处理
+
+超时时返回：
+```
+[超时] 工具执行超时 (30秒)
+工具: web_search_tool
+参数: {...}
+建议: 尝试简化操作或使用更具体的参数
+```
+
+### 设计目的
+
+- 防止单个工具阻塞整个 Agent
+- 模型收到超时错误后可选择重试或跳过
+- 避免 Agent 在某个工具上无限等待
+
+---
+
+## 【文件操作工具】(集成在 CMD 工具中)
 
 ### read_local_file
 读取本地文件内容。**修改前必须先读取！**
+
+使用 Python 直接读取，支持自动编码检测和行数限制。
 
 ```
 参数:
   - file_path: 文件路径 (相对或绝对)
   - encoding: 编码，默认自动检测
   - max_lines: 最大行数限制
+  - show_line_numbers: 是否显示行号，默认 True
 
 返回: 带行号的文件内容
+
+返回格式:
+[文件] /path/to/file.py
+[编码] utf-8 | [行数] 150 | [大小] 4.2 KB
+
+--- Content ---
+第     1 行 | #!/usr/bin/env python3
+第     2 行 | """Module docstring"""
+...
+--- End ---
 ```
 
 ### list_directory
@@ -28,9 +169,9 @@
 
 ```
 参数:
-  - path: 目录路径
+  - path: 目录路径，默认为 "."
   - show_hidden: 是否显示隐藏文件
-  - recursive: 是否递归
+  - recursive: 是否递归列出子目录
 
 返回: 格式化的目录列表
 ```
@@ -276,3 +417,176 @@ commit_compressed_memory(摘要, 下一目标)
 9. commit_compressed_memory() # 保存记忆
 10. trigger_self_restart()    # 重启生效
 ```
+
+---
+
+## 【CMD 系统工具】
+
+提供在 Windows 环境下执行 CMD/PowerShell 命令的功能。
+
+### 1. run_cmd - 执行 CMD 命令
+
+```
+run_cmd(command, timeout=60, shell=True, cwd=None, check_safety=True)
+```
+
+**参数说明：**
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| command | str | 必填 | 要执行的命令（如 "dir", "python script.py"） |
+| timeout | int | 60 | 超时时间（秒） |
+| shell | bool | True | 是否使用 shell 执行 |
+| cwd | str | None | 工作目录 |
+| check_safety | bool | True | 是否执行安全检查（默认启用黑名单拦截） |
+
+**返回值：**
+```
+[CMD] 返回码: 0
+
+[标准输出]
+命令的实际输出内容...
+```
+
+**使用示例：**
+```python
+# 查看当前目录
+run_cmd("dir")
+
+# 查看网络配置
+run_cmd("ipconfig /all")
+
+# 运行 Python 脚本
+run_cmd("python my_script.py")
+
+# 在指定目录执行
+run_cmd("git status", cwd="C:\\Projects\\MyRepo")
+
+# 查看 Python 版本
+run_cmd("python --version")
+```
+
+### 2. run_powershell - 执行 PowerShell 命令
+
+```
+run_powershell(command, timeout=60, cwd=None)
+```
+
+**使用示例：**
+```python
+# 列出所有进程
+run_powershell("Get-Process")
+
+# 获取网络配置
+run_powershell("Get-NetIPAddress -AddressFamily IPv4")
+
+# 列出所有服务
+run_powershell("Get-Service")
+```
+
+### 3. run_batch - 批量执行命令
+
+```
+run_batch(commands, timeout=60, cwd=None)
+```
+
+**参数说明：**
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| commands | str | 必填 | JSON 格式的命令列表，如 '["cd src", "dir"]' |
+| timeout | int | 60 | 总超时时间（秒） |
+| cwd | str | None | 工作目录 |
+
+**使用示例：**
+```python
+# 进入目录后执行
+run_batch('["cd C:\\\\", "dir *.exe"]')
+
+# 安装依赖并运行测试
+run_batch('["pip install requests", "python test.py"]')
+```
+
+### 安全说明
+
+**危险命令黑名单：** 系统会自动拦截以下命令：
+- `format` - 格式化磁盘
+- `del /f /s /q` - 强制删除
+- `rmdir /s /q` - 删除目录
+- `shutdown` - 关机命令
+- `sysprep` - 系统准备工具
+- `cipher /w:` - 数据擦除
+
+如果需要绕过安全检查（危险操作），可将 `check_safety=False`，但请谨慎使用。
+
+---
+
+## 【错误码说明】
+
+| 返回码 | 含义 |
+|--------|------|
+| 0 | 命令执行成功 |
+| 非0数字 | 命令执行失败（具体含义取决于命令本身） |
+| -1 | 命令执行超时 |
+| -2 | 安全检查拒绝（危险命令） |
+| -3 | 命令不存在 |
+| -4 | 权限不足 |
+| -99 | 其他未知错误 |
+
+---
+
+**注意：** CMD 工具仅在 Windows 环境下可用。
+
+---
+
+## 【增强版 Token 管理机制】
+
+本 Agent 采用多层 Token 控制机制，防止上下文爆炸。
+
+### 核心优化
+
+1. **预压缩机制** - 在 Token 达到 50% 时就提前压缩，避免危机
+2. **多级压缩** - 根据紧急程度选择压缩强度（警告/触发/紧急）
+3. **消息优先级** - 区分不同类型消息的重要性（CRITICAL > HIGH > MEDIUM > LOW > TRIVIAL）
+4. **智能截断** - 根据消息类型采用不同策略（保留开头和结尾）
+5. **动态阈值** - 三级阈值：警告(50%)、触发(60%)、紧急(80%)
+6. **预算感知** - 实时追踪 Token 消耗，预留 10% buffer
+
+### 压缩阈值
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `max_token_limit` | 8000 | 总 Token 预算 |
+| `keep_recent_steps` | 3 | 保留最近交互对数 |
+| `summary_max_chars` | 200 | 摘要最大字符数 |
+| 警告阈值 | 50% | 触发预压缩 |
+| 触发阈值 | 60% | 触发正常压缩 |
+| 紧急阈值 | 80% | 触发紧急压缩（仅保留1对） |
+
+### 压缩级别
+
+| 级别 | 条件 | 保留对数 | 摘要长度 |
+|------|------|---------|---------|
+| warning | 50-60% | 3对 | 200字 |
+| active | 60-80% | 2对 | 150字 |
+| emergency | >80% | 1对 | 100字 |
+
+### 消息优先级
+
+| 优先级 | 消息类型 | 截断策略 |
+|--------|---------|---------|
+| CRITICAL | 系统提示词 | 不截断 |
+| HIGH | 错误信息、编辑结果 | 保留首尾 |
+| MEDIUM | AI思考、用户输入 | 保留开头 |
+| LOW | 早期历史 | 压缩 |
+| TRIVIAL | 重复搜索结果 | 可丢弃 |
+
+### 压缩统计
+
+Agent 内部维护压缩统计：
+- 总压缩次数 / 紧急压缩次数 / 预压缩次数
+- 累计节省 Token 数
+- 峰值 Token 使用
+- 压缩类型分布
+
+---
+
+**Token 估算说明：** 使用中英文混合估算，中文约 1.5 字符/token，英文约 4 字符/token。

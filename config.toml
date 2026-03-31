@@ -27,6 +27,8 @@ api_timeout = 60
 [agent]
 # Agent 名称
 name = "SelfEvolvingAgent"
+# 工作区域 - 所有生成的文件都在此目录下（相对于项目根目录）
+workspace = "workspace"
 # 苏醒间隔（秒）- Agent 每隔多久苏醒一次进行思考
 awake_interval = 10
 # 单次苏醒的最大工具调用次数
@@ -47,7 +49,7 @@ auto_restart_threshold = 0
 # 启用运行时上下文压缩
 enabled = true
 # Token 阈值，超过此值触发压缩（建议设为模型 context window 的 50-70%）
-max_token_limit = 4000
+max_token_limit = 6000
 # 保留最近的工具调用次数（让模型知道自己最近在干嘛）
 keep_recent_steps = 2
 # 压缩摘要的最大字数
