@@ -47,6 +47,15 @@ from tools.code_tools import (
 from tools.safety_tools import (
     check_syntax,
     backup_project,
+    run_self_test,
+    get_agent_status,
+)
+
+# 进化追踪工具
+from tools.evolution_tracker import (
+    log_evolution,
+    get_evolution_history,
+    get_evolution_stats,
 )
 
 # 重生工具
@@ -60,19 +69,26 @@ __all__ = [
     'web_search',
     'read_webpage',
     'extract_links',
-    
+
     # 文件工具
     'list_directory',
     'read_local_file',
-    
+
     # 代码工具
     'edit_local_file',
     'create_new_file',
-    
+
     # 安全工具
     'check_syntax',
     'backup_project',
-    
+    'run_self_test',
+    'get_agent_status',
+
+    # 进化追踪
+    'log_evolution',
+    'get_evolution_history',
+    'get_evolution_stats',
+
     # 重生工具
     'trigger_self_restart',
 ]

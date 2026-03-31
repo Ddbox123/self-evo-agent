@@ -1,11 +1,10 @@
 import chardet
 import sys
 
-# 尝试检测文件编码
 def detect_encoding(file_path):
     try:
         with open(file_path, 'rb') as f:
-            raw_data = f.read(10000)  # 读取前10KB
+            raw_data = f.read(10000)
         result = chardet.detect(raw_data)
         encoding = result['encoding'] or 'utf-8'
         # 检查 BOM
@@ -20,10 +19,15 @@ def detect_encoding(file_path):
         return f'error: {e}'
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        file_path = sys.argv[1]
-        encoding = detect_encoding(file_path)
-        print(f'File: {file_path}')
-        print(f'Detected encoding: {encoding}')
-    else:
-        print('Usage: python diagnose_encoding.py <file_path>')
+    file_path = 'agent.py'
+    encoding = detect_encoding(file_path)
+    print(f'Detected encoding for {file_path}: {encoding}')
+    # 尝试用检测到的编码读取并打印前几行
+    try:
+        with open(file_path, 'r', encoding=encoding) as f:
+            lines = f.readlines()[:5]
+        print('First 5 lines:')
+        for i, line in enumerate(lines, 1):
+            print(f'{i}: {line.rstrip()}')
+    except Exception as e:
+        print(f'Failed to read with encoding {encoding}: {e}')

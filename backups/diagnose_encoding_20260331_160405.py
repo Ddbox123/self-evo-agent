@@ -7,15 +7,7 @@ def detect_encoding(file_path):
         with open(file_path, 'rb') as f:
             raw_data = f.read(10000)  # 读取前10KB
         result = chardet.detect(raw_data)
-        encoding = result['encoding'] or 'utf-8'
-        # 检查 BOM
-        if raw_data.startswith(b'\xef\xbb\xbf'):
-            encoding = 'utf-8-sig'
-        elif raw_data.startswith(b'\xff\xfe'):
-            encoding = 'utf-16-le'
-        elif raw_data.startswith(b'\xfe\xff'):
-            encoding = 'utf-16-be'
-        return encoding
+        return result['encoding'] or 'utf-8'
     except Exception as e:
         return f'error: {e}'
 

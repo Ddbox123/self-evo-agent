@@ -28,7 +28,7 @@ api_timeout = 60
 # Agent 名称
 name = "SelfEvolvingAgent"
 # 苏醒间隔（秒）- Agent 每隔多久苏醒一次进行思考
-awake_interval = 60
+awake_interval = 10
 # 单次苏醒的最大工具调用次数
 max_iterations = 100
 # 最大运行时间（秒），0 表示无限制
@@ -74,14 +74,8 @@ restart_enabled = true
 [log]
 # 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
 level = "INFO"
-# 日志格式
-format = "%(asctime)s | %(levelname)-8s | %(message)s"
-# 日期格式
-date_format = "%Y-%m-%d %H:%M:%S"
 # 是否写入文件
 file_enabled = false
-# 日志文件路径
-file_path = "logs/agent.log"
 
 # ============================================================
 # 网络配置

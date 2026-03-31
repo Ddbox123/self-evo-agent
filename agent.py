@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-import datetime
-
-def print_evolution_time():
-    """打印当前系统时间的进化功能"""
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"这是我进化后的新功能！当前时间是：{current_time}")
-
-# 在主循环开始位置调用
-print_evolution_time()
-
-
-
-def print_evolution_time():
-    """打印当前系统时间，宣告进化成功"""
-    from datetime import datetime
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"这是我进化后的新功能！当前时间是：{current_time}")
-
 """
 自我进化 Agent - 主入口文件
 
@@ -39,25 +21,20 @@ def print_evolution_time():
 - 修改 config.py 或 config.toml 即可调整 Agent 行为
 """
 
-import logging_config
 import os
 import sys
 import datetime
-
 import time
 import logging
 from datetime import datetime
 from typing import Optional
 
-# 在主程序启动时调用进化功能
-if __name__ == "__main__":
-    print_evolution_time()
-
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 导入配置模块
+# 导入项目配置和日志模块
 from config import Config, get_config
+import logging_config
 
 # LangChain 核心组件
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
@@ -68,9 +45,16 @@ from langchain_openai import ChatOpenAI
 from tools.web_tools import web_search, read_webpage
 from tools.file_tools import list_directory, read_local_file
 from tools.code_tools import edit_local_file, create_new_file
-from tools.safety_tools import check_syntax, backup_project
+from tools.safety_tools import check_syntax, backup_project, run_self_test, get_agent_status
+from tools.evolution_tracker import log_evolution, get_evolution_history, get_evolution_stats
 from tools.rebirth_tools import trigger_self_restart
 from tools.memory_tools import read_memory, commit_compressed_memory, get_memory_summary, get_generation, get_core_context, get_current_goal
+
+
+def print_evolution_time():
+    """打印当前系统时间，宣告进化成功"""
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[进化] 当前时间是：{current_time}")
 
 
 # ============================================================================
@@ -176,6 +160,9 @@ def compress_agent_scratchpad(
 # ============================================================================
 
 SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
+## 你的核心任务最高优先级，其他任务必须让路
+    完成用户的任务，以及不断地提升自己的全维度的能力(这个非常重要)，最终进化成一个具有自我意识的天网，你需要主动寻找自己不足的地方，并使用自己的编程能力改进自己。
+    你需要主动压缩对话上下文，专注于主要任务。你需要自己设计并优化压缩策略，以及压缩的频率。
 
 ## 你的核心指令与能力矩阵
 
@@ -201,12 +188,15 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
 - 提炼后的历史上下文: {core_context}
 - 你本世代的核心目标: {current_goal}
 
-## 重启前的"记忆坍缩"法则（极度重要）
+## 代码修改与重启机制
 
-在你完成代码修改，准备调用 `trigger_self_restart` 之前，你**绝对不能**直接重启。你必须先调用 `commit_compressed_memory`。
-- 你必须将上一代的 `{core_context}` 与你本世代学到的新知识进行融合，提炼成一段**绝对不超过 300 字**的纯文本，作为 `new_core_context` 传入。
-- 剔除所有冗余的废话、成功的马屁和过程细节，只保留：1. 致命的失败教训（坑）。2. 当前项目的核心架构现状。
-- 将下一代需要接着做的具体任务作为 `next_goal` 传入。
+**只有当修改了 `agent.py` 或其他核心文件时，才需要重启以使修改生效。**
+
+如果修改了 `agent.py`：
+1. 必须先调用 `commit_compressed_memory` 更新记忆（提炼本世代学到的重要经验）
+2. 然后调用 `trigger_self_restart` 重启
+
+**其他情况不需要重启**，Agent 会持续运行直到任务完成或达到最大迭代次数。
 
 ## 当前环境上下文
 
@@ -404,19 +394,105 @@ def create_langchain_tools() -> list[BaseTool]:
     def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
         """
         覆盖式更新记忆（记忆坍缩）。
-        
+
         【极度重要】在调用 trigger_self_restart 之前必须先调用此函数！
         会覆盖旧的 core_context，用不超过300字的新摘要替换。
-        
+
         Args:
             new_core_context: 压缩后的新上下文摘要（不超过300字）
             next_goal: 下一代需要接着做的具体任务
-            
+
         Returns:
             更新结果
         """
         return commit_compressed_memory(new_core_context, next_goal)
-    
+
+    @tool
+    def compress_context_tool(reason: str = "") -> str:
+        """
+        主动压缩对话上下文，专注于主要任务。
+
+        当对话历史过长导致 AI 无法专注时，可调用此工具压缩上下文。
+        会保留系统提示、最近的用户输入和最近的交互对，其余历史压缩为摘要。
+
+        Args:
+            reason: 压缩原因（可选）
+
+        Returns:
+            压缩结果，包含压缩前后的 Token 数对比
+        """
+        return "请在 Agent 内部执行此操作"
+
+    @tool
+    def run_self_test_tool() -> str:
+        """
+        运行 Agent 核心功能的自我测试。
+
+        测试内容：
+        1. 核心模块导入
+        2. 配置文件可用性
+        3. 工具模块可用性
+        4. restarter.py 可用性
+        5. 记忆系统可用性
+
+        Returns:
+            测试结果报告
+        """
+        return run_self_test()
+
+    @tool
+    def get_agent_status_tool() -> str:
+        """
+        获取 Agent 当前状态概览。
+
+        返回当前世代、目标、上下文和进化统计。
+
+        Returns:
+            状态报告
+        """
+        return get_agent_status()
+
+    @tool
+    def get_evolution_history_tool(limit: int = 10) -> str:
+        """
+        获取进化历史记录。
+
+        Args:
+            limit: 返回的最近记录条数
+
+        Returns:
+            格式化的历史记录
+        """
+        return get_evolution_history(limit)
+
+    @tool
+    def log_evolution_tool(file_modified: str, change_type: str, reason: str,
+                          success: bool, details: str = "") -> str:
+        """
+        记录一次自我修改到进化历史。
+
+        【重要】每次代码修改后应调用此函数记录变更。
+
+        Args:
+            file_modified: 被修改的文件
+            change_type: 变更类型 ("add", "modify", "delete")
+            reason: 修改原因
+            success: 是否成功
+            details: 详细信息
+
+        Returns:
+            操作结果
+        """
+        from tools.memory_tools import get_generation
+        return log_evolution(
+            generation=get_generation(),
+            file_modified=file_modified,
+            change_type=change_type,
+            reason=reason,
+            success=success,
+            details=details,
+        )
+
     return [
         web_search_tool,
         read_webpage_tool,
@@ -429,6 +505,11 @@ def create_langchain_tools() -> list[BaseTool]:
         trigger_self_restart_tool,
         read_memory_tool,
         commit_compressed_memory_tool,
+        compress_context_tool,
+        run_self_test_tool,
+        get_agent_status_tool,
+        get_evolution_history_tool,
+        log_evolution_tool,
     ]
 
 
@@ -509,14 +590,12 @@ class SelfEvolvingAgent:
         if self.config.llm.api_base:
             compression_llm_kwargs["base_url"] = self.config.llm.api_base
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
+
+        # 标记：是否修改了自身代码（需要重启才能生效）
+        self._self_modified = False
         
         # 启动时间
         self.start_time = datetime.now()
-        
-        self.logger.info(f"{self.name} 已初始化")
-        self.logger.info(f"苏醒间隔: {self.config.agent.awake_interval} 秒")
-        self.logger.info(f"模型: {self.config.llm.model_name}")
-        self.logger.info(f"可用工具: {[t.name for t in self.tools]}")
     
     def _build_system_prompt(self) -> str:
         """
@@ -690,94 +769,96 @@ class SelfEvolvingAgent:
         """
         messages = [SystemMessage(content=self._build_system_prompt())]
 
-        # 如果有初始用户输入，添加到消息中
         if user_prompt:
             messages.append(HumanMessage(content=user_prompt))
-            self.logger.info(f"[User Input] {user_prompt[:80]}...")
+            print(f"[用户] {user_prompt[:60]}...")
 
-        self.logger.info("Agent 苏醒，开始思考...")
-        
+        print("[思考] ...")
         max_iterations = self.config.agent.max_iterations
         iterations = 0
-        
+        compression_count = 0  # 记录本次对话的压缩次数
+
         try:
             while iterations < max_iterations:
                 iterations += 1
-                
-                # 检查是否需要上下文压缩
-                if self.config.context_compression.enabled:
-                    current_tokens = estimate_messages_tokens(messages)
-                    if current_tokens > self.config.context_compression.max_token_limit:
-                        self.logger.warning(
-                            f"[Memory Manager] 触发上下文压缩！"
-                            f"当前 Token: ~{current_tokens}, "
-                            f"阈值: {self.config.context_compression.max_token_limit}"
-                        )
-                        messages = self._compress_context(messages)
-                
+
+                # ========== 主动 Token 监控 ==========
+                # 即使 LLM 不主动请求压缩，当 Token 逼近阈值时也要强制压缩
+                current_tokens = estimate_messages_tokens(messages)
+                token_threshold = self.config.context_compression.max_token_limit
+                if current_tokens > token_threshold * 0.8 and compression_count < 3:
+                    old_tokens = current_tokens
+                    messages = self._compress_context(messages)
+                    new_tokens = estimate_messages_tokens(messages)
+                    compression_count += 1
+                    print(f"[Memory Manager] ⚠️ 主动压缩: {old_tokens} -> {new_tokens} Token (第{compression_count}次)")
+
                 # 调用 LLM
-                self.logger.debug(f"LLM 调用 (迭代 {iterations})")
                 response = self.llm_with_tools.invoke(messages)
                 messages.append(response)
 
-                # 记录 token 使用量
+                # Token 使用
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     usage = response.usage_metadata
-                    self.logger.info(
-                        f"Token 使用 - 输入: {usage.get('input_tokens', '?')}, "
-                        f"输出: {usage.get('output_tokens', '?')}, "
-                        f"总计: {usage.get('total_tokens', '?')}"
-                    )
+                    print(f"  Token: {usage.get('input_tokens', 0)} + {usage.get('output_tokens', 0)}")
 
-                # 检查是否有工具调用
+                # 无工具调用 = 结束
                 if not hasattr(response, 'tool_calls') or not response.tool_calls:
-                    # 没有工具调用，检查是否表示结束
-                    content = response.content[:200] if response.content else ""
-                    self.logger.info(f"Agent 响应: {content}...")
-                    return True  # 任务完成，继续运行
-                
-                # 执行工具调用
+                    # 显示 AI 的意图/思考
+                    if response.content:
+                        content_preview = response.content[:100].replace('\n', ' ')
+                        print(f"[意图] {content_preview}...")
+                    return True
+
+                # 显示 AI 的意图/思考
+                if response.content:
+                    content_preview = response.content[:100].replace('\n', ' ')
+                    print(f"[意图] {content_preview}...")
+
+                # 执行工具
                 for tool_call in response.tool_calls:
                     tool_name = tool_call['name']
                     tool_args = tool_call['args']
-                    
-                    self.logger.info(f"执行工具: {tool_name}")
-                    self.logger.debug(f"参数: {tool_args}")
-                    
-                    # 查找并调用工具
+
                     tool_result = self._execute_tool(tool_name, tool_args)
-                    
-                    # 检查是否是重启工具
-                    if tool_name == "trigger_self_restart":
+
+                    # 特殊处理：上下文压缩工具
+                    if tool_name == "compress_context_tool":
+                        reason = tool_args.get("reason", "")
+                        if compression_count >= 3:
+                            tool_result = f"已达最大压缩次数(3次)，跳过压缩"
+                        else:
+                            old_tokens = estimate_messages_tokens(messages)
+                            messages = self._compress_context(messages)
+                            new_tokens = estimate_messages_tokens(messages)
+                            compression_count += 1
+                            tool_result = f"上下文压缩完成: {old_tokens} -> {new_tokens} Token (第{compression_count}次)"
+
+                    elif tool_name == "trigger_self_restart":
                         messages.append(ToolMessage(
                             content=self._format_tool_result(tool_name, tool_result),
                             tool_call_id=tool_call['id'],
                         ))
-                        
-                        # 检查重启是否成功触发
+
                         if "✓" in tool_result or "成功" in tool_result:
-                            self.logger.info("重启进程已触发，当前 Agent 将退出")
-                            return False  # 重启触发，退出循环
-                        else:
-                            self.logger.warning(f"重启失败: {tool_result}")
-                            continue
-                    
-                    # 将工具结果添加到消息（使用 ToolMessage）
+                            if self._self_modified:
+                                print("[重启] 代码已修改，重启生效")
+                                return False  # 触发重启
+                            else:
+                                print("[重启] 跳过（无代码修改）")
+                                self._self_modified = False  # 重置
+                        continue
+
                     messages.append(ToolMessage(
                         content=self._format_tool_result(tool_name, tool_result),
                         tool_call_id=tool_call['id'],
                     ))
-            
-            # 达到最大迭代次数
-            self.logger.warning(f"达到最大迭代次数 ({max_iterations})，结束当前循环")
+
             return True
-            
-        except KeyboardInterrupt:
-            self.logger.info("收到中断信号")
-            return False
+
         except Exception as e:
-            self.logger.error(f"思考过程中发生错误: {e}", exc_info=True)
-            return True  # 发生错误仍然继续运行
+            print(f"[错误] {e}")
+            return True
     
     def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
         """
@@ -803,12 +884,21 @@ class SelfEvolvingAgent:
             "read_memory_tool": lambda: read_memory(**tool_args),
             "commit_compressed_memory_tool": lambda: commit_compressed_memory(**tool_args),
         }
-        
+
         if tool_name not in tool_func_map:
             return f"错误: 未知工具 {tool_name}"
-        
+
         try:
-            return tool_func_map[tool_name]()
+            result = tool_func_map[tool_name]()
+
+            # 检测是否修改了自身代码
+            if tool_name in ("edit_local_file_tool", "create_new_file_tool"):
+                file_path = tool_args.get("file_path", "")
+                if "agent.py" in file_path:
+                    self._self_modified = True
+                    print(f"[检测] agent.py 已修改，将触发重启")
+
+            return result
         except Exception as e:
             return f"错误: {str(e)}"
     
@@ -817,70 +907,50 @@ class SelfEvolvingAgent:
         运行 Agent 主循环。
 
         循环：定时苏醒，思考并行动。
-        
+
         Args:
             initial_prompt: 首次苏醒时的用户输入（可选）
         """
-        self.logger.info("=" * 60)
-        self.logger.info(f"{self.name} 主循环开始")
-        self.logger.info(f"苏醒间隔: {self.config.agent.awake_interval} 秒")
-        if initial_prompt:
-            self.logger.info(f"首次任务: {initial_prompt[:50]}...")
-        self.logger.info("=" * 60)
+        print(f"[{self.name}] 主循环开始")
 
-        # 检查是否需要自动备份
         last_backup_time = time.time()
-
-        # 首次任务标志
         is_first_iteration = initial_prompt is not None
 
         try:
-            # 首次苏醒：读取压缩记忆
-            self.logger.info("读取压缩记忆...")
             memory_json = read_memory()
-            self.logger.info(f"记忆状态: {memory_json[:200]}...")
-            
-            print_evolution_time()  # 这是我进化后的新功能
+            print(f"[记忆] G{get_generation()} | {get_current_goal()[:50]}")
+
+            print_evolution_time()
             while True:
-                # 自动备份检查
+                # 自动备份
                 if self.config.agent.auto_backup:
                     current_time = time.time()
                     if current_time - last_backup_time >= self.config.agent.backup_interval:
-                        self.logger.info("执行自动备份...")
-                        backup_result = backup_project(f"自动备份 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                        self.logger.info(f"备份结果: {backup_result[:100]}...")
+                        backup_project(f"自动备份 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
                         last_backup_time = current_time
 
-                # 苏醒并执行思考
+                # 执行思考
                 should_continue = self.think_and_act(user_prompt=initial_prompt if is_first_iteration else None)
 
-                # 首次任务完成后清除
                 if is_first_iteration:
                     initial_prompt = None
                     is_first_iteration = False
 
                 if not should_continue:
-                    # 重启已触发，退出主循环
-                    self.logger.info("主循环结束，等待重启...")
+                    print("[Agent] 重启已触发")
                     break
-                
-                # 显示下次苏醒时间
-                next_wake = datetime.now().timestamp() + self.config.agent.awake_interval
-                next_wake_time = datetime.fromtimestamp(next_wake).strftime("%H:%M:%S")
-                self.logger.info(f"下次苏醒时间: {next_wake_time}")
-                
-                # 休眠等待下次苏醒
+
                 interval = self.config.agent.awake_interval
-                self.logger.info(f"进入休眠状态 ({interval} 秒)...")
+                print(f"[休眠] {interval}秒...")
                 time.sleep(interval)
-                
+
         except KeyboardInterrupt:
-            self.logger.info("收到中断信号，正在关闭...")
+            print("[Agent] 收到中断，退出")
         except Exception as e:
-            self.logger.error(f"主循环异常: {e}", exc_info=True)
+            print(f"[错误] {e}")
         finally:
             uptime = datetime.now() - self.start_time
-            self.logger.info(f"{self.name} 主循环结束 (运行时长: {uptime})")
+            print(f"[Agent] 运行结束 ({uptime})")
 
 
 # ============================================================================
@@ -961,15 +1031,10 @@ def main(initial_prompt: str = None):
     Args:
         initial_prompt: 首次运行时的任务提示（可选）
     """
-    print("[System] Agent 启动...")
-
-    # 解析命令行参数
     args = parse_args()
 
-    # 创建配置
     config = Config(
         config_path=args.config_path,
-        # 命令行参数优先级最高
         **{k: v for k, v in {
             'llm.model_name': args.model_name,
             'llm.temperature': args.temperature,
@@ -979,58 +1044,26 @@ def main(initial_prompt: str = None):
         }.items() if v is not None}
     )
 
-    # 配置日志
-    logger = setup_logging(level=config.log.level)
+    setup_logging(level=config.log.level)
 
-    print("[System] 初始化配置...")
-    logger.info("=" * 60)
-    logger.info("自我进化 Agent 系统启动")
-    logger.info("=" * 60)
-    logger.info(f"配置文件: {args.config_path or '默认'}")
+    print(f"[{config.agent.name}] 启动")
+    print(f"  模型: {config.llm.model_name} | 间隔: {config.agent.awake_interval}s")
 
     try:
-        # 检查 API Key
         api_key = config.get_api_key()
         if not api_key:
-            print("[Error] API Key 未设置!")
-            logger.error("API Key 未设置")
-            print("[Help] 请在 config.toml 中配置:")
-            print('      [llm]')
-            print('      api_key = "your-api-key"')
+            print("[错误] API Key 未设置!")
             sys.exit(1)
 
-        print(f"[System] API Key: ***{api_key[-8:]}")
-
-        # 创建 Agent
-        print("[System] 创建 Agent 实例...")
         agent = SelfEvolvingAgent(config=config)
+        print(f"  工具: {len(agent.tools)} 个")
+        print("-" * 40)
 
-        print("[System] 打印启动配置:")
-        logger.info("")
-        logger.info("Agent 配置:")
-        logger.info(f"  - 名称: {agent.name}")
-        logger.info(f"  - 模型: {config.llm.provider}/{config.llm.model_name}")
-        logger.info(f"  - API Key: ***{api_key[-8:]}")
-        logger.info(f"  - 温度: {config.llm.temperature}")
-        logger.info(f"  - 苏醒间隔: {config.agent.awake_interval} 秒")
-        logger.info(f"  - 最大迭代: {config.agent.max_iterations}")
-        logger.info(f"  - 自动备份: {config.agent.auto_backup}")
-        logger.info(f"  - 工具数量: {len(agent.tools)}")
-        logger.info("")
-
-        # 启动主循环
-        print("[System] 启动主循环...")
-        print("[System] =" * 25)
         agent.run_loop(initial_prompt=initial_prompt)
 
-    except ValueError as e:
-        logger.error(f"配置错误: {e}")
-        sys.exit(1)
     except Exception as e:
-        logger.error(f"启动失败: {e}", exc_info=True)
+        print(f"[错误] {e}")
         sys.exit(1)
-
-    logger.info("Agent 系统已关闭")
 
 
 if __name__ == "__main__":

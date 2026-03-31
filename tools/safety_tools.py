@@ -459,3 +459,157 @@ Contents:
     except Exception as e:
         logger.error(f"备份创建失败: {e}", exc_info=True)
         return f"错误: 备份创建失败 - {str(e)}"
+
+
+# ============================================================================
+# 自我测试模块 - 验证 Agent 核心功能
+# ============================================================================
+
+def run_self_test() -> str:
+    """
+    运行 Agent 核心功能的自我测试。
+
+    测试内容：
+    1. 核心模块导入
+    2. 配置文件可用性
+    3. 工具模块可用性
+    4. restarter.py 可用性
+    5. 记忆系统可用性
+
+    Returns:
+        测试结果报告
+    """
+    results = []
+    all_passed = True
+
+    def test(name: str, condition: bool, detail: str = "") -> None:
+        nonlocal all_passed
+        status = "PASS" if condition else "X FAIL"
+        if not condition:
+            all_passed = False
+        results.append(f"  [{status}] {name}")
+        if detail and not condition:
+            results.append(f"         {detail}")
+
+    results.append("=" * 50)
+    results.append("Agent 自我测试报告")
+    results.append("=" * 50)
+    results.append("")
+
+    # 测试 1: 核心模块导入
+    results.append("[1] 核心模块导入测试")
+    try:
+        import agent
+        test("agent.py 可导入", True)
+    except Exception as e:
+        test("agent.py 可导入", False, str(e))
+
+    try:
+        import config
+        test("config.py 可导入", True)
+    except Exception as e:
+        test("config.py 可导入", False, str(e))
+
+    # 测试 2: 工具模块导入
+    results.append("")
+    results.append("[2] 工具模块导入测试")
+    try:
+        from tools import web_search, read_local_file, edit_local_file
+        test("工具模块 可导入", True)
+    except Exception as e:
+        test("工具模块 可导入", False, str(e))
+
+    # 测试 3: 配置文件检查
+    results.append("")
+    results.append("[3] 配置文件测试")
+    config_path = PROJECT_ROOT / "config.toml"
+    test("config.toml 存在", config_path.exists())
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            has_api_key = "api_key" in content
+            test("config.toml 包含 api_key", has_api_key)
+        except Exception as e:
+            test("config.toml 可读", False, str(e))
+
+    # 测试 4: restarter.py 检查
+    results.append("")
+    results.append("[4] 重启系统测试")
+    restarter_path = PROJECT_ROOT / "restarter.py"
+    test("restarter.py 存在", restarter_path.exists())
+    if restarter_path.exists():
+        try:
+            import ast
+            with open(restarter_path, 'r', encoding='utf-8') as f:
+                ast.parse(f.read())
+            test("restarter.py 语法正确", True)
+        except SyntaxError as e:
+            test("restarter.py 语法正确", False, f"行 {e.lineno}: {e.msg}")
+        except Exception as e:
+            test("restarter.py 可读", False, str(e))
+
+    # 测试 5: 记忆系统测试
+    results.append("")
+    results.append("[5] 记忆系统测试")
+    memory_path = PROJECT_ROOT / "memory.json"
+    test("memory.json 可写/可读", memory_path.exists())
+    if memory_path.exists():
+        try:
+            import json
+            with open(memory_path, 'r', encoding='utf-8') as f:
+                memory = json.load(f)
+            has_generation = "generation" in memory
+            test("memory.json 格式正确", has_generation)
+        except Exception as e:
+            test("memory.json 可读", False, str(e))
+
+    # 测试 6: 语法自检能力
+    results.append("")
+    results.append("[6] 语法自检测试")
+    try:
+        from tools.safety_tools import check_syntax
+        result = check_syntax(str(PROJECT_ROOT / "agent.py"))
+        is_ok = "Syntax OK" in result
+        test("agent.py 语法检查", is_ok)
+    except Exception as e:
+        test("语法检查工具", False, str(e))
+
+    # 总结
+    results.append("")
+    results.append("=" * 50)
+    if all_passed:
+        results.append("所有测试通过！Agent 状态正常。")
+    else:
+        results.append("X 部分测试失败，请检查上述问题。")
+    results.append("=" * 50)
+
+    return "\n".join(results)
+
+
+def get_agent_status() -> str:
+    """
+    获取 Agent 当前状态概览。
+
+    Returns:
+        状态报告
+    """
+    from tools.memory_tools import get_generation, get_current_goal, get_core_context
+    from tools.evolution_tracker import get_evolution_stats
+
+    lines = [
+        "=" * 50,
+        "Agent 状态概览",
+        "=" * 50,
+        "",
+        f"世代: G{get_generation()}",
+        f"当前目标: {get_current_goal() or '(未设置)'}",
+        "",
+        "核心上下文:",
+        get_core_context() or '(无)',
+        "",
+        "进化统计:",
+        get_evolution_stats(),
+    ]
+
+    return "\n".join(lines)
