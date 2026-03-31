@@ -854,7 +854,6 @@ def main(initial_prompt: str = None):
 
 
 if __name__ == "__main__":
-    print_evolution_time()
     args = parse_args()
 
     if args.test:

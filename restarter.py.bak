@@ -39,12 +39,8 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    if 'logger' in locals():
-        logger.warning("psutil 未安装，restarter 功能将受限")
-        logger.info("请运行: pip install psutil")
-    else:
-        print("警告: psutil 未安装，restarter 功能将受限")
-        print("请运行: pip install psutil")
+    print("警告: psutil 未安装，restarter 功能将受限")
+    print("请运行: pip install psutil")
 
 
 # ============================================================================

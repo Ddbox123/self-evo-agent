@@ -1,0 +1,3 @@
+# Self-check test file
+print('Self-check successful!')
+print('Current time:', __import__('datetime').datetime.now())

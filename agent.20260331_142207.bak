@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-
-
-def print_evolution_time():
-    """打印当前系统时间，宣告进化成功"""
-    from datetime import datetime
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"这是我进化后的新功能！当前时间是：{current_time}")
-
 """
 自我进化 Agent - 主入口文件
 
@@ -854,7 +846,6 @@ def main(initial_prompt: str = None):
 
 
 if __name__ == "__main__":
-    print_evolution_time()
     args = parse_args()
 
     if args.test:
