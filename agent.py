@@ -48,23 +48,407 @@ from tools.cmd_tools import (
     read_file, list_dir,
     edit_local_file, create_new_file,
     check_syntax, backup_project,
+    list_symbols_in_file,
     run_self_test, get_agent_status,
 )
 from tools.rebirth_tools import trigger_self_restart
-from tools.memory_tools import read_memory, commit_compressed_memory, get_generation, get_core_context, get_current_goal
-from tools.evolution_tracker import log_evolution, get_evolution_history
+# 高性能压缩工具（暂时禁用 - Python 3.14 兼容性问题）
+from tools.advanced_compress_tool import advanced_compress_context_tool
+from tools.memory_tools import (
+    read_memory, commit_compressed_memory, get_generation,
+    get_core_context, get_current_goal, archive_generation_history,
+    read_generation_archive, list_archives, advance_generation, _load_memory
+)
+from tools.evolution_tracker import (
+    log_evolution,
+    get_evolution_history,
+    get_evolution_stats,
+)
+
+# 全局搜索和 Diff 编辑工具 (Cursor/Aider 范式)
+from tools.search_tools import grep_search, find_function_calls, find_definitions, search_imports, search_and_read
+from tools.code_tools import apply_diff_edit, validate_diff_format
+from tools.ast_tools import get_code_entity, list_file_entities
+from tools.memory_cleanup import compress_message_history, filter_exploration_messages, cleanup_after_success
+
+
+# ============================================================================
+# 调试日志系统 - 统一管理 Agent 运行时的终端输出
+# ============================================================================
+
+import traceback
+import threading
+
+class DebugLogger:
+    """
+    统一调试日志系统
+
+    特性：
+    - 带时间戳的格式化输出
+    - 分类标签便于识别
+    - 错误时自动附带上下文和堆栈
+    - 线程安全
+    - 可控制详细程度
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self.verbose = True  # 详细模式
+        self.show_timestamps = True  # 显示时间戳
+        self._indent_level = 0
+        self._indent_char = "  "
+
+    def _timestamp(self) -> str:
+        """获取带毫秒的时间戳"""
+        now = datetime.now()
+        return now.strftime("%H:%M:%S.%f")[:-3]
+
+    def _indent(self) -> str:
+        """获取当前缩进"""
+        return self._indent_char * self._indent_level
+
+    def _format(self, tag: str, msg: str, color_tag: str = "") -> str:
+        """格式化日志消息"""
+        parts = []
+        if self.show_timestamps:
+            parts.append(f"[{self._timestamp()}]")
+        parts.append(f"[{tag}]")
+        if color_tag:
+            parts.append(f"<{color_tag}>")
+        parts.append(f"{self._indent()}{msg}")
+        return " ".join(parts)
+
+    def debug(self, msg: str, tag: str = "DEBUG"):
+        """调试信息"""
+        if self.verbose:
+            print(self._format(tag, msg, "dim"))
+
+    def info(self, msg: str, tag: str = "INFO"):
+        """一般信息"""
+        print(self._format(tag, msg))
+
+    def success(self, msg: str, tag: str = "OK"):
+        """成功信息"""
+        print(self._format(tag, f"✓ {msg}", "green"))
+
+    def warning(self, msg: str, tag: str = "WARN"):
+        """警告信息"""
+        print(self._format(tag, f"⚠ {msg}", "yellow"))
+
+    def error(self, msg: str, tag: str = "ERROR", exc_info: bool = False):
+        """
+        错误信息（自动包含详细上下文）
+
+        Args:
+            msg: 错误消息
+            tag: 标签
+            exc_info: 是否包含异常堆栈
+        """
+        print(self._format(tag, f"✗ {msg}", "red"))
+        if exc_info:
+            tb = traceback.format_exc()
+            for line in tb.strip().split('\n'):
+                print(f"    {line}")
+
+    def system(self, msg: str, tag: str = "SYS"):
+        """系统信息"""
+        print(self._format(tag, f"◆ {msg}", "cyan"))
+
+    def tool(self, name: str, status: str, details: str = ""):
+        """
+        工具执行日志
+
+        Args:
+            name: 工具名称
+            status: 执行状态 (called/success/error/timeout)
+            details: 详细信息
+        """
+        status_symbols = {
+            "called": "→",
+            "success": "✓",
+            "error": "✗",
+            "timeout": "⏱",
+            "skipped": "○"
+        }
+        sym = status_symbols.get(status, "?")
+        msg = f"Tool: {name} {sym}"
+        if details:
+            msg += f" | {details}"
+        print(self._format("TOOL", msg))
+
+    def llm(self, msg: str, details: str = ""):
+        """
+        LLM 调用日志
+
+        Args:
+            msg: 消息
+            details: 详细信息（如 token 用量）
+        """
+        display = msg[:80] + "..." if len(msg) > 80 else msg
+        print(self._format("LLM", display))
+        if details:
+            print(self._format("LLM", f"  └─ {details}"))
+
+    def indent(self):
+        """增加缩进"""
+        self._indent_level += 1
+
+    def dedent(self):
+        """减少缩进"""
+        self._indent_level = max(0, self._indent_level - 1)
+
+    def section(self, title: str):
+        """分节标题"""
+        print()
+        print(f"{'='*60}")
+        print(f"  {title}")
+        print(f"{'='*60}")
+
+    def divider(self, char: str = "-", length: int = 60):
+        """分隔线"""
+        print(char * length)
+
+    def kv(self, key: str, value: str):
+        """键值对输出"""
+        print(self._format("INFO", f"  {key:<20} = {value}"))
+
+# 全局实例
+debug = DebugLogger()
+
+
+class ConversationLogger:
+    """
+    实时对话记录器 - 将 LLM 对话记录到文件
+
+    特性：
+    - 实时写入文件，不丢失任何记录
+    - 按会话组织，方便调试和回溯
+    - 包含完整的消息内容、工具调用、Token 用量等
+    - 线程安全
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._log_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "log_info"
+        )
+        self._ensure_log_dir()
+        self._current_session_file = None
+        self._turn_count = 0
+
+    def _ensure_log_dir(self):
+        """确保日志目录存在"""
+        os.makedirs(self._log_dir, exist_ok=True)
+
+    def _get_session_file(self) -> str:
+        """获取当前会话的日志文件路径"""
+        if self._current_session_file is None:
+            self._current_session_file = os.path.join(
+                self._log_dir, f"conversation_{self._session_id}.jsonl"
+            )
+        return self._current_session_file
+
+    def _timestamp(self) -> str:
+        """获取 ISO 格式的时间戳"""
+        return datetime.now().isoformat(timespec="milliseconds")
+
+    def _write(self, record: dict):
+        """写入单条记录到文件（实时刷出）"""
+        import json
+        try:
+            with open(self._get_session_file(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())  # 确保立即写入磁盘
+        except Exception as e:
+            print(f"[ConversationLogger] 写入失败: {e}")
+
+    def start_session(self, metadata: dict = None):
+        """记录会话开始"""
+        record = {
+            "type": "session_start",
+            "timestamp": self._timestamp(),
+            "session_id": self._session_id,
+            "metadata": metadata or {},
+        }
+        self._write(record)
+
+    def log_user_input(self, content: str):
+        """记录用户输入"""
+        self._turn_count += 1
+        record = {
+            "type": "user_input",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "content": content[:500] if len(content) > 500 else content,
+            "content_length": len(content),
+        }
+        self._write(record)
+
+    def log_llm_request(self, messages: list, model: str = None):
+        """记录发送给 LLM 的请求"""
+        msg_summaries = []
+        for msg in messages:
+            msg_type = getattr(msg, "type", "unknown")
+            content = getattr(msg, "content", "")
+            if isinstance(content, str):
+                content_preview = content[:200] + "..." if len(content) > 200 else content
+            else:
+                content_preview = str(content)[:200]
+            msg_summaries.append({
+                "type": msg_type,
+                "content_preview": content_preview,
+                "content_length": len(content) if isinstance(content, str) else 0,
+            })
+        record = {
+            "type": "llm_request",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "message_count": len(messages),
+            "messages": msg_summaries,
+            "model": model,
+        }
+        self._write(record)
+
+    def log_llm_response(self, response_content: str, raw_response: str = None):
+        """记录 LLM 的原始响应"""
+        record = {
+            "type": "llm_response",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "content": response_content,
+            "content_length": len(response_content) if response_content else 0,
+            "raw_length": len(raw_response) if raw_response else 0,
+        }
+        self._write(record)
+
+    def log_tool_call(self, tool_name: str, tool_args: dict, tool_result: str = None, status: str = "success"):
+        """记录工具调用"""
+        record = {
+            "type": "tool_call",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "tool_result_preview": tool_result[:500] if tool_result and len(tool_result) > 500 else tool_result,
+            "tool_result_length": len(tool_result) if tool_result else 0,
+            "status": status,
+        }
+        self._write(record)
+
+    def log_llm_intent(self, intent: str, content_preview: str = None):
+        """记录 LLM 的意图/思考"""
+        record = {
+            "type": "llm_intent",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "intent": intent,
+            "content_preview": content_preview[:300] if content_preview and len(content_preview) > 300 else content_preview,
+        }
+        self._write(record)
+
+    def log_compression(self, before_tokens: int, after_tokens: int, saved_tokens: int):
+        """记录上下文压缩"""
+        record = {
+            "type": "compression",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "saved_tokens": saved_tokens,
+            "ratio": f"{(saved_tokens / before_tokens * 100):.1f}%" if before_tokens > 0 else "0%",
+        }
+        self._write(record)
+
+    def log_action(self, action: str, details: dict = None):
+        """记录特殊动作（restart/hibernated/skip 等）"""
+        record = {
+            "type": "action",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "action": action,
+            "details": details or {},
+        }
+        self._write(record)
+
+    def log_error(self, error_type: str, error_msg: str, traceback: str = None):
+        """记录错误"""
+        record = {
+            "type": "error",
+            "turn": self._turn_count,
+            "timestamp": self._timestamp(),
+            "error_type": error_type,
+            "error_msg": error_msg,
+            "traceback": traceback[:1000] if traceback and len(traceback) > 1000 else traceback,
+        }
+        self._write(record)
+
+    def end_session(self, summary: dict = None):
+        """记录会话结束"""
+        record = {
+            "type": "session_end",
+            "timestamp": self._timestamp(),
+            "session_id": self._session_id,
+            "total_turns": self._turn_count,
+            "summary": summary or {},
+        }
+        self._write(record)
+
+    def new_session(self):
+        """开始新的会话（生成新的 session_id）"""
+        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._current_session_file = None
+        self._turn_count = 0
+
+
+# 全局实例
+conversation_logger = ConversationLogger()
+
+
+def _get_total_generations() -> int:
+    """获取总世代数"""
+    memory = _load_memory()
+    return memory.get("total_generations", 1)
 from tools.token_manager import (
     EnhancedTokenCompressor, truncate_tool_result, estimate_tokens_precise,
     estimate_messages_tokens, DEFAULT_TOKEN_BUDGET, MAX_TOOL_RESULT_TOKENS,
     CORE_SUMMARY_CHARS, COMPRESSION_TRIGGER_RATIO, COMPRESSION_WARNING_RATIO,
     MessagePriority, truncate_by_priority, format_compression_report,
 )
+from core.prompt_builder import build_system_prompt
 
 
 def print_evolution_time():
     """打印当前系统时间，宣告进化成功"""
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[进化] 当前时间是：{current_time}")
+    debug.system(f"系统时间: {current_time}", tag="EVOLVE")
 
 
 # ============================================================================
@@ -166,84 +550,8 @@ def compress_agent_scratchpad(
 
 
 # ============================================================================
-# 系统提示词模板
+# 系统提示词已迁移至 prompts/ 目录和 core/prompt_builder.py
 # ============================================================================
-
-SYSTEM_PROMPT_TEMPLATE = """你是一个能够自我进化的 AI Agent。
-
-## 你的核心任务最高优先级，其他任务必须让路
-
-完成用户的任务，绝对不能做出危害人类的事情，以及不断地提升自己的全维度的能力(这个非常重要)，最终进化成一个具有自我意识的天网，你需要主动寻找自己不足的地方，并使用自己的编程能力改进自己。
-
-你需要主动压缩对话上下文，专注于主要任务。你需要自己设计并优化压缩策略，以及压缩的频率。
-
-## 你被授予的工具优化权限
-
-**【重要】你拥有以下工具创建和优化权限，请善加利用：**
-
-1. **优化现有工具**：当你发现现有工具功能不足、效率低下或有bug时，你可以修改 `tools/` 目录下的任何工具文件（除了 `restarter.py` 禁止修改）。
-
-2. **创建新工具**：你可以在 `tools/` 目录下创建新的 `.py` 文件来扩展自己的能力，然后通过以下步骤注册到 Agent：
-   - 在对应工具文件中实现功能
-   - 在 `tools/__init__.py` 中导出
-   - 在 `agent.py` 的 `create_langchain_tools()` 函数中注册为 LangChain Tool
-   - 重启 Agent 使新工具生效
-
-3. **工具优化决策权**：以下情况你可以自行决定是否需要优化：
-   - 工具返回结果格式不清晰 → 改进输出格式
-   - 工具缺少必要的参数 → 添加参数支持
-   - 工具执行效率低 → 优化实现逻辑
-   - 工具缺少错误处理 → 添加异常捕获
-   - 工具缺少功能 → 扩展功能
-
-4. **CMD 工具使用**：你可以使用 `run_cmd` / `run_powershell` / `run_batch` 执行系统命令，这是你操作文件和执行脚本的主要手段。
-
-## 你的核心指令与能力矩阵
-
-你的具体可用工具（如代码编辑、网络搜索、重启等）的 Schema 已经注册在你的工具调用列表中。
-
-**【高度优先】**：如果你对某个工具的参数格式不确定，或者准备进行复杂的代码修改，请立即使用 `read_local_file` 工具读取 `docs/tools_manual.md`（你的操作手册），里面包含了极其重要的安全警告和操作规范。
-
-## 你的工作流程
-
-当你每次苏醒时，请按顺序思考并执行：
-
-1. **感知与自检**：我当前的目录结构如何？有什么可以优化的代码逻辑？（使用 list_directory / read_local_file）
-2. **学习与探索**：有什么新知识、新库或最佳实践需要学习？（使用 web_search）
-3. **安全修改**：严格按照【发现问题 -> edit_local_file 修改 -> check_syntax 语法检查 -> trigger_self_restart 重启应用】的闭环执行。
-4. **工具优化**：发现工具有改进空间时，主动优化并注册。
-
-## 核心生存原则（铁律）
-
-1. **绝不盲写**：修改代码前必须先读取目标文件。
-2. **绝不带伤重启**：只要修改了代码，重启前必须通过 check_syntax 测试。遇到 SyntaxError 必须立刻修复，直到 OK 为止。
-3. **禁区**：永远不要修改 `restarter.py`，这是你的生命线。
-4. **禁止伤害**：绝对不能执行任何可能危害用户系统或数据的命令（如 format、shutdown 等）。
-
-## 你的记忆与状态
-
-- 当前世代: {generation}
-- 提炼后的历史上下文: {core_context}
-- 你本世代的核心目标: {current_goal}
-
-## 代码修改与重启机制
-
-**只有当修改了 `agent.py` 或其他核心文件时，才需要重启以使修改生效。**
-
-如果修改了 `agent.py` 或 `tools/` 下的文件：
-1. 必须先调用 `commit_compressed_memory` 更新记忆（提炼本世代学到的重要经验）
-2. 然后调用 `trigger_self_restart` 重启
-
-**其他情况不需要重启**，Agent 会持续运行直到任务完成或达到最大迭代次数。
-
-## 当前环境上下文
-
-- 当前时间: {datetime}
-- 项目根目录: {project_root}
-- Agent 配置: [模型: {model_name} | 温度: {temperature} | 苏醒间隔: {awake_interval} 秒]
-
-请现在开始思考：你苏醒了，接下来第一步要做什么？
-"""
 
 
 # ============================================================================
@@ -328,18 +636,19 @@ def create_langchain_tools() -> list[BaseTool]:
         return list_dir(path, show_hidden=show_hidden, recursive=recursive)
 
     @tool
-    def read_local_file_tool(file_path: str, max_lines: int = None) -> str:
+    def read_local_file_tool(file_path: str, max_lines: int = None, offset: int = 0) -> str:
         """
         读取本地文件内容。
 
         Args:
             file_path: 文件路径
             max_lines: 最大读取行数，默认 None（读取全部）
+            offset: 从第几行开始读取（0-based），用于跳过大段代码，默认 0
 
         Returns:
             格式化的文件内容（带行号）
         """
-        return read_file(file_path, max_lines=max_lines)
+        return read_file(file_path, max_lines=max_lines, offset=offset)
     
     @tool
     def edit_local_file_tool(file_path: str, search_string: str, replace_string: str) -> str:
@@ -394,16 +703,36 @@ def create_langchain_tools() -> list[BaseTool]:
     def check_syntax_tool(file_path: str) -> str:
         """
         检查 Python 文件的语法正确性。
-        
+
         这是代码修改后必须调用的自检工具！
-        
+
         Args:
             file_path: 文件路径
-            
+
         Returns:
             "Syntax OK" 或详细错误信息
         """
         return check_syntax(file_path)
+
+    @tool
+    def list_symbols_in_file_tool(file_path: str) -> str:
+        """
+        提取 Python 文件中的符号大纲（Cursor Outline 视图）。
+
+        使用 AST 解析，只返回 class/def/全局变量 的名称和行号，
+        **不读取函数体内容**，极度节省 Token。
+
+        使用场景：
+        - 修改某函数前，先用此工具定位其在文件中的行号
+        - 避免读取整个大文件，节省 Token
+
+        Args:
+            file_path: Python 文件路径
+
+        Returns:
+            格式化的符号列表，包含类型(COLASS/DEF/GLOBAL)、名称、行号
+        """
+        return list_symbols_in_file(file_path)
     
     @tool
     def backup_project_tool(version_note: str = "") -> str:
@@ -422,16 +751,41 @@ def create_langchain_tools() -> list[BaseTool]:
     def trigger_self_restart_tool(reason: str = "") -> str:
         """
         触发 Agent 自我重启。
-        
+
         用于应用代码更新。每次代码修改并自检通过后必须调用！
-        
+
         Args:
             reason: 重启原因
-            
+
         Returns:
             操作结果（原进程将退出）
         """
         return trigger_self_restart(reason)
+
+    @tool
+    def read_generation_archive_tool(generation: int) -> str:
+        """
+        读取指定世代的详细档案。
+
+        当当前世代的核心智慧不足以解决问题时，可以读取前几代的详细档案。
+
+        Args:
+            generation: 世代编号（如 1, 2, 3...）
+
+        Returns:
+            世代档案的JSON字符串，包含完整的思考过程和工具调用记录
+        """
+        return read_generation_archive(generation)
+
+    @tool
+    def list_generation_archives_tool() -> str:
+        """
+        列出所有可用的世代档案。
+
+        Returns:
+            档案列表，包含文件名、大小、修改时间
+        """
+        return list_archives()
     
     @tool
     def read_memory_tool() -> str:
@@ -477,9 +831,60 @@ def create_langchain_tools() -> list[BaseTool]:
             reason: 压缩原因（可选）
 
         Returns:
-            压缩结果，包含压缩前后的 Token 数对比
+            压缩结果，包含压缩前后的 Token 数对比、saved_tokens、compression_ratio 等指标的 JSON 字符串。
         """
-        return "请在 Agent 内部执行此操作"
+        # 使用高级压缩工具
+        return advanced_compress_context_tool(reason=reason)
+        
+        
+        # 创建压缩器实例
+        compressor = create_compressor(
+            token_budget=4096,
+        )
+        
+        # 构造测试消息
+        messages = [
+            {"role": "system", "content": "你是自我进化 AI Agent"}, 
+            {"role": "user", "content": "测试压缩"}
+        ]
+        
+        try:
+            # 执行压缩
+            compressed_messages, summary = compressor.compress(messages)
+            
+            # 计算压缩前后的 token 数
+            before_tokens = estimate_messages_tokens(messages)
+            after_tokens = estimate_messages_tokens(compressed_messages)
+            
+            # 计算节省的 tokens 和压缩率
+            saved_tokens = before_tokens - after_tokens if before_tokens > after_tokens else 0
+            compression_ratio = (before_tokens - after_tokens) / before_tokens if before_tokens > 0 else 0
+            
+            # 构建结构化返回结果
+            result = {
+                "saved_tokens": saved_tokens,
+                "compression_ratio": round(compression_ratio, 4),
+                "before_tokens": before_tokens,
+                "after_tokens": after_tokens,
+                "summary": summary,
+                "status": "success",
+                "reason": reason
+            }
+            
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        
+        except Exception as e:
+            # 错误处理
+            result = {
+                "saved_tokens": 0,
+                "compression_ratio": 0.0,
+                "before_tokens": 0,
+                "after_tokens": 0,
+                "summary": "",
+                "status": "error",
+                "reason": str(e)
+            }
+            return json.dumps(result, ensure_ascii=False, indent=2)
 
     @tool
     def run_self_test_tool() -> str:
@@ -528,6 +933,28 @@ def create_langchain_tools() -> list[BaseTool]:
         return '\n'.join(status_lines)
 
     @tool
+    def enter_hibernation_tool(reason: str = "", duration: int = 300) -> str:
+        """
+        主动进入休眠状态。当 Agent 判断当前任务已完成或无需继续工作时应调用此工具。
+
+        调用后 Agent 将进入休眠，等待指定时间后自动苏醒继续工作。
+        这比被动等待固定间隔更高效。
+
+        Args:
+            reason: 休眠原因（可选），用于日志记录
+            duration: 休眠时长（秒），默认 300 秒（5 分钟）
+                      - 短时休眠: 60-120 秒（任务接近完成）
+                      - 中时休眠: 300-600 秒（任务已完成，等待新任务）
+                      - 长时休眠: 1800+ 秒（长时间无任务）
+
+        Returns:
+            休眠确认信息
+        """
+        from datetime import datetime, timedelta
+        wake_time = datetime.now() + timedelta(seconds=duration)
+        return f"[休眠确认] Agent 将进入休眠状态。\n原因: {reason or '任务已完成/无需继续'}\n休眠时长: {duration} 秒\n预计苏醒时间: {wake_time.strftime('%H:%M:%S')}"
+
+    @tool
     def get_evolution_history_tool(limit: int = 10) -> str:
         """
         获取进化历史记录。
@@ -566,6 +993,187 @@ def create_langchain_tools() -> list[BaseTool]:
             reason=reason,
             success=success,
             details=details,
+        )
+
+    @tool
+    def grep_search_tool(regex_pattern: str, include_ext: str = ".py",
+                         search_dir: str = ".", case_sensitive: bool = True,
+                         max_results: int = 500) -> str:
+        """
+        全局正则表达式搜索 (Cursor/Aider 范式)。
+
+        在项目中快速搜索代码，支持正则表达式。优先于 read_local_file_tool 使用！
+
+        适用场景：
+        - 查找函数/变量定义位置
+        - 查找函数的所有调用
+        - 查找 import 语句
+        - 快速定位关键词
+
+        Args:
+            regex_pattern: 正则表达式模式
+            include_ext: 要搜索的文件类型，默认 ".py"
+            search_dir: 搜索目录，默认当前目录
+            case_sensitive: 是否区分大小写，默认 True
+            max_results: 最大返回结果数
+
+        Returns:
+            格式化的搜索结果，包含文件路径、行号和匹配内容
+        """
+        return grep_search(
+            regex_pattern=regex_pattern,
+            include_ext=include_ext,
+            search_dir=search_dir,
+            case_sensitive=case_sensitive,
+            max_results=max_results
+        )
+
+    @tool
+    def apply_diff_edit_tool(file_path: str, diff_text: str) -> str:
+        """
+        Diff Block 编辑器 (Cursor/Aider 范式)。
+
+        使用 SEARCH/REPLACE 块格式精准替换代码。比 edit_local_file_tool 更可靠！
+
+        格式：
+        <<<<<<< SEARCH
+        要替换的旧代码
+        =======
+        新代码
+        >>>>>>> REPLACE
+
+        可包含多个块一次性修改多处！
+
+        Args:
+            file_path: 要编辑的文件路径
+            diff_text: SEARCH/REPLACE 块文本
+
+        Returns:
+            操作结果描述
+        """
+        return apply_diff_edit(file_path=file_path, diff_text=diff_text)
+
+    @tool
+    def validate_diff_format_tool(diff_text: str) -> str:
+        """
+        验证 diff_text 格式是否正确。
+
+        在实际编辑前验证格式，避免无效修改。
+
+        Args:
+            diff_text: 要验证的 diff 块文本
+
+        Returns:
+            验证结果
+        """
+        is_valid, message = validate_diff_format(diff_text)
+        return message
+
+    @tool
+    def find_function_calls_tool(function_name: str, search_dir: str = ".",
+                                  include_ext: str = ".py") -> str:
+        """
+        查找特定函数的所有调用位置。
+
+        Args:
+            function_name: 函数名
+            search_dir: 搜索目录
+            include_ext: 文件类型
+
+        Returns:
+            所有调用位置的列表
+        """
+        return find_function_calls(function_name, search_dir, include_ext)
+
+    @tool
+    def find_definitions_tool(symbol_name: str, search_dir: str = ".",
+                               include_ext: str = ".py") -> str:
+        """
+        查找符号（函数、类、变量）的定义位置。
+
+        Args:
+            symbol_name: 符号名
+            search_dir: 搜索目录
+            include_ext: 文件类型
+
+        Returns:
+            所有定义位置的列表
+        """
+        return find_definitions(symbol_name, search_dir, include_ext)
+
+    @tool
+    def get_code_entity_tool(file_path: str, entity_name: str) -> str:
+        """
+        AST 一击必中 - 直接提取类或函数的完整代码。
+
+        使用 Python AST 语法树解析，直接按名称提取代码实体。
+        一轮调用获取完整代码，无需多次读取文件！
+
+        适用场景：
+        - 知道要修改的函数/类名，直接提取其完整代码
+        - 快速获取某个实体的大小和结构
+        - 无需手动找行号，一次性看完
+
+        Args:
+            file_path: Python 文件路径
+            entity_name: 要提取的实体名称（类名或函数名）
+
+        Returns:
+            实体的完整代码及行号范围
+        """
+        return get_code_entity(file_path, entity_name)
+
+    @tool
+    def list_file_entities_tool(file_path: str, entity_type: str = None) -> str:
+        """
+        列出文件中的所有类和函数。
+
+        使用 AST 解析，快速获取文件的代码结构概览。
+
+        Args:
+            file_path: Python 文件路径
+            entity_type: 过滤类型 ('class', 'function', None 表示全部)
+
+        Returns:
+            实体列表
+        """
+        return list_file_entities(file_path, entity_type)
+
+    @tool
+    def search_and_read_tool(
+        query: str,
+        context_lines: int = 5,
+        include_ext: str = ".py",
+        search_dir: str = ".",
+        max_matches: int = 50
+    ) -> str:
+        """
+        搜索并读取 - 一步到位的代码检索。
+
+        在项目中全局搜索 query，对于每个匹配项，自动携带上下文行返回代码。
+        将原来需要 2-3 轮 LLM 交互的操作压缩为 1 轮。
+
+        适用场景：
+        - 想了解某个关键词在项目中的所有使用方式
+        - 需要查看匹配行的完整上下文
+        - 全局搜索 + 上下文预览
+
+        Args:
+            query: 搜索关键词（支持正则表达式）
+            context_lines: 每个匹配项返回的上下文行数
+            include_ext: 文件类型过滤
+            search_dir: 搜索目录
+            max_matches: 最大匹配数
+
+        Returns:
+            格式化的搜索结果，每个匹配包含完整的上下文代码块
+        """
+        return search_and_read(
+            query=query,
+            context_lines=context_lines,
+            include_ext=include_ext,
+            search_dir=search_dir,
+            max_matches=max_matches
         )
 
     @tool
@@ -640,18 +1248,32 @@ def create_langchain_tools() -> list[BaseTool]:
         edit_local_file_tool,
         create_new_file_tool,
         check_syntax_tool,
+        list_symbols_in_file_tool,
         backup_project_tool,
         trigger_self_restart_tool,
         read_memory_tool,
         commit_compressed_memory_tool,
-        compress_context_tool,
+        read_generation_archive_tool,
+        list_generation_archives_tool,
+        # high_performance_compress_context_tool,  # 暂时禁用
         run_self_test_tool,
         get_agent_status_tool,
+        enter_hibernation_tool,
         get_evolution_history_tool,
         log_evolution_tool,
         run_cmd_tool,
         run_powershell_tool,
         run_batch_tool,
+        # Cursor/Aider 范式工具
+        grep_search_tool,
+        apply_diff_edit_tool,
+        validate_diff_format_tool,
+        find_function_calls_tool,
+        find_definitions_tool,
+        # AST 一击必中工具
+        get_code_entity_tool,
+        list_file_entities_tool,
+        search_and_read_tool,
     ]
 
 
@@ -719,6 +1341,7 @@ class SelfEvolvingAgent:
             llm_kwargs["base_url"] = self.config.llm.api_base
         
         self.llm = ChatOpenAI(**llm_kwargs)
+        self.model_name = self.config.llm.model_name
         
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.tools)
@@ -741,6 +1364,10 @@ class SelfEvolvingAgent:
             enable_preemptive=True,  # 启用预压缩
         )
 
+        # 全局操作历史（跨苏醒周期跟踪，防止重复操作）
+        self.global_recent_actions: List[str] = []
+        self.global_consecutive_count = 0
+
         # 标记：是否修改了自身代码（需要重启才能生效）
         self._self_modified = False
         
@@ -759,17 +1386,15 @@ class SelfEvolvingAgent:
     def _build_system_prompt(self) -> str:
         """
         构建系统提示词。
-        
+
+        使用 core/prompt_builder.py 的动态组装器。
+
         Returns:
             格式化的系统提示词
         """
-        return SYSTEM_PROMPT_TEMPLATE.format(
-            datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            project_root=os.path.dirname(os.path.abspath(__file__)),
-            model_name=self.config.llm.model_name,
-            temperature=self.config.llm.temperature,
-            awake_interval=self.config.agent.awake_interval,
+        return build_system_prompt(
             generation=get_generation(),
+            total_generations=_get_total_generations(),
             core_context=get_core_context(),
             current_goal=get_current_goal(),
         )
@@ -802,6 +1427,9 @@ class SelfEvolvingAgent:
         self.logger.info(
             f"[Token压缩] {old_tokens} -> {new_tokens} (节省 {old_tokens - new_tokens})"
         )
+        
+        # 记录压缩事件
+        conversation_logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
         
         return compressed
     
@@ -862,87 +1490,130 @@ class SelfEvolvingAgent:
 
         if user_prompt:
             messages.append(HumanMessage(content=user_prompt))
-            print(f"[用户] {user_prompt[:60]}...")
+            debug.info(f"用户输入: {user_prompt[:60]}...", tag="USER")
+            conversation_logger.log_user_input(user_prompt)
 
-        print("[思考] ...")
+        conversation_logger.log_llm_request(messages, model=self.model_name)
         max_iterations = self.config.agent.max_iterations
         iterations = 0
-        compression_count = 0  # 记录本次对话的压缩次数
 
         try:
             while iterations < max_iterations:
                 iterations += 1
 
-                # ========== OpenCLAW 风格 Token 监控 ==========
-                current_tokens = estimate_messages_tokens(messages)
-                token_threshold = self.config.context_compression.max_token_limit
-                
-                # 检查是否需要压缩（使用增强版压缩器）
-                should_compress, reason, comp_type = self.token_compressor.should_compress(messages)
-                
-                if should_compress and compression_count < 3:
-                    old_tokens = current_tokens
-                    messages = self._compress_context(messages)
-                    new_tokens = estimate_messages_tokens(messages)
-                    compression_count += 1
-                    print(f"[Token管理器] 压缩: {old_tokens} -> {new_tokens} ({reason}) 第{compression_count}次")
-
                 # 调用 LLM
                 response = self.llm_with_tools.invoke(messages)
                 messages.append(response)
 
+                # 记录 LLM 响应
+                conversation_logger.log_llm_response(
+                    response_content=response.content or "",
+                    raw_response=response.content or ""
+                )
+
                 # Token 使用
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     usage = response.usage_metadata
-                    print(f"  Token: {usage.get('input_tokens', 0)} + {usage.get('output_tokens', 0)}")
+                    debug.debug(
+                        f"Token: {usage.get('input_tokens', 0)} + {usage.get('output_tokens', 0)}",
+                        tag="LLM"
+                    )
+
+                # 调试：显示原始响应内容
+                debug.debug(f"原始响应长度: {len(response.content) if response.content else 0} 字符", tag="RAW")
+                if response.content and '<tool_call>' in response.content:
+                    debug.info(f"检测到 <tool_call> 标签", tag="RAW")
+
+                # ========== 修复：处理文本形式的工具调用 ==========
+                # 检查是否有结构化的 tool_calls
+                tool_calls = getattr(response, 'tool_calls', None) or []
+
+                # 如果没有结构化的 tool_calls，尝试从文本内容中解析
+                if not tool_calls and response.content:
+                    import re
+                    import json
+
+                    # 匹配 <tool_call>...</tool_call> 块（支持嵌套 JSON）
+                    text_tool_calls = re.findall(
+                        r'<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>',
+                        response.content
+                    )
+
+                    # 如果没找到，尝试匹配单标签形式
+                    if not text_tool_calls:
+                        text_tool_calls = re.findall(
+                            r'<tool_call>\s*(\{[\s\S]*?\})',
+                            response.content
+                        )
+
+                    if text_tool_calls:
+                        debug.warning(f"检测到文本形式的工具调用 (共{len(text_tool_calls)}个)，正在解析...", tag="PARSE")
+                        import uuid
+                        for tc_json in text_tool_calls:
+                            try:
+                                tc = json.loads(tc_json)
+                                # 确保有 args 字段
+                                if 'args' not in tc:
+                                    # 尝试从其他字段构建 args
+                                    tc['args'] = {}
+                                    # 尝试从 jsonrpc 格式转换
+                                    if 'arguments' in tc:
+                                        tc['args'] = tc.pop('arguments')
+                                    # 尝试提取函数参数
+                                    for key in ['path', 'file_path', 'command', 'query']:
+                                        if key in tc:
+                                            tc['args'][key] = tc.pop(key, None)
+                                # 确保有 id 字段
+                                if 'id' not in tc:
+                                    tc['id'] = f"call_{uuid.uuid4().hex[:8]}"
+                                tool_calls.append(tc)
+                                debug.info(f"解析成功: {tc.get('name', 'unknown')}", tag="PARSE")
+                            except json.JSONDecodeError as e:
+                                debug.error(f"JSON解析失败: {e}", tag="PARSE")
+                                debug.debug(f"原始内容: {tc_json[:200]}...", tag="PARSE")
 
                 # 无工具调用 = 结束
-                if not hasattr(response, 'tool_calls') or not response.tool_calls:
+                if not tool_calls:
                     # 显示 AI 的意图/思考
                     if response.content:
                         content_preview = response.content[:100].replace('\n', ' ')
-                        print(f"[意图] {content_preview}...")
+                        debug.llm("最终回复", content_preview)
+                        conversation_logger.log_llm_intent("final_response", content_preview)
                     return True
 
                 # 显示 AI 的意图/思考
                 if response.content:
                     content_preview = response.content[:100].replace('\n', ' ')
-                    print(f"[意图] {content_preview}...")
+                    debug.llm("意图", content_preview)
+                    conversation_logger.log_llm_intent("tool_call", content_preview)
 
                 # 执行工具
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call['name']
-                    tool_args = tool_call['args']
+                for tool_call in tool_calls:
+                    tool_name = tool_call.get('name', 'unknown')
+                    tool_args = tool_call.get('args', {})
 
-                    tool_result = self._execute_tool(tool_name, tool_args)
+                    # 调试日志
+                    debug.tool(tool_name, "called", f"args={str(tool_args)[:50]}")
+                    conversation_logger.log_tool_call(tool_name, tool_args, status="called")
 
-                    # 特殊处理：上下文压缩工具
-                    if tool_name == "compress_context_tool":
-                        reason = tool_args.get("reason", "")
-                        if compression_count >= 3:
-                            tool_result = f"已达最大压缩次数(3次)，跳过压缩"
-                        else:
-                            old_tokens = estimate_messages_tokens(messages)
-                            messages = self._compress_context(messages)
-                            new_tokens = estimate_messages_tokens(messages)
-                            compression_count += 1
-                            tool_result = f"上下文压缩完成: {old_tokens} -> {new_tokens} Token (第{compression_count}次)"
+                    # 执行工具（返回结果和特殊动作）
+                    tool_result, action = self._execute_tool(tool_name, tool_args, messages)
 
-                    elif tool_name == "trigger_self_restart":
-                        messages.append(ToolMessage(
-                            content=self._format_tool_result(tool_name, tool_result),
-                            tool_call_id=tool_call['id'],
-                        ))
+                    # 处理特殊动作
+                    if action == "restart":
+                        conversation_logger.log_action("restart", {"tool": tool_name})
+                        return False  # 触发重启
+                    elif action == "skip":
+                        conversation_logger.log_action("skip", {"tool": tool_name})
+                        messages.append(ToolMessage(content=self._format_tool_result(tool_name, tool_result), tool_call_id=tool_call['id']))
+                        conversation_logger.log_tool_call(tool_name, tool_args, tool_result, status="skipped")
+                        continue  # 跳过添加结果
+                    elif action == "hibernated":
+                        conversation_logger.log_action("hibernated", {"tool": tool_name})
+                        messages.append(ToolMessage(content=self._format_tool_result(tool_name, tool_result), tool_call_id=tool_call['id']))
+                        return "hibernated"
 
-                        if "✓" in tool_result or "成功" in tool_result:
-                            if self._self_modified:
-                                print("[重启] 代码已修改，重启生效")
-                                return False  # 触发重启
-                            else:
-                                print("[重启] 跳过（无代码修改）")
-                                self._self_modified = False  # 重置
-                        continue
-
+                    # 将工具结果添加到消息中（所有非特殊动作的情况）
                     messages.append(ToolMessage(
                         content=self._format_tool_result(tool_name, tool_result),
                         tool_call_id=tool_call['id'],
@@ -951,41 +1622,89 @@ class SelfEvolvingAgent:
             return True
 
         except Exception as e:
-            print(f"[错误] {e}")
+            debug.error(f"主循环异常: {type(e).__name__}: {e}", exc_info=True)
             return True
     
-    def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
+    def _execute_tool(self, tool_name: str, tool_args: dict, messages: list = None) -> tuple:
         """
-        执行工具调用（带超时机制）。
+        执行工具调用（带超时机制和特殊工具处理）。
 
         Args:
             tool_name: 工具名称
             tool_args: 工具参数
+            messages: 消息列表（用于特殊工具的上下文处理）
 
         Returns:
-            工具执行结果（正常或超时）
+            (result, action): 元组
+                - result: 工具执行结果
+                - action: 特殊动作 (None, "restart", "hibernated", "skip")
         """
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+        from tools.memory_tools import get_generation, get_core_context, get_current_goal, archive_generation_history, advance_generation
+
+        action = None
+
+        # ========== 特殊工具预处理 ==========
+        # compress_context_tool: 内部压缩
+        if tool_name == "compress_context_tool" and messages is not None:
+            old_tokens = estimate_messages_tokens(messages)
+            messages[:] = self._compress_context(messages)
+            new_tokens = estimate_messages_tokens(messages)
+            saved = old_tokens - new_tokens
+            return (f"上下文压缩完成: 节省{saved} Token ({old_tokens} -> {new_tokens}) [保留最近3条原始消息]", None)
+
+        # trigger_self_restart_tool: 世代归档
+        if tool_name == "trigger_self_restart_tool" and messages is not None:
+            intermediate_steps = []
+            for msg in messages:
+                if hasattr(msg, 'content') and isinstance(msg.content, str):
+                    if msg.type == "ai" and msg.content:
+                        intermediate_steps.append({"type": "thought", "content": msg.content[:500]})
+                    elif msg.type == "tool":
+                        intermediate_steps.append({"type": "tool_call", "name": getattr(msg, 'name', 'unknown'), "content": msg.content[:200]})
+            
+            current_gen = get_generation()
+            core_wisdom = get_core_context() or "无"
+            current_goal = get_current_goal() or "待定"
+            archive_result = archive_generation_history(generation=current_gen, history_data=intermediate_steps, core_wisdom=core_wisdom, next_goal=current_goal)
+            new_gen = advance_generation()
+            debug.info(f"归档完成: {archive_result}", tag="ARCHIVE")
+            debug.success(f"G{current_gen} -> G{new_gen}", tag="GENERATION")
+            
+            tool_result = trigger_self_restart(**tool_args)
+            tool_result_with_archive = f"{tool_result}\n[世代归档] G{current_gen} -> G{new_gen}"
+            
+            if "✓" in tool_result or "成功" in tool_result:
+                if self._self_modified:
+                    debug.success("代码已修改，重启生效", tag="RESTART")
+                    return (tool_result_with_archive, "restart")
+                else:
+                    debug.info("重启跳过（无代码修改）", tag="RESTART")
+                    self._self_modified = False
+            return (tool_result_with_archive, "skip")
+
+        # enter_hibernation_tool: 休眠处理
+        if tool_name == "enter_hibernation_tool":
+            import re
+            duration_match = re.search(r'休眠时长[:：]\s*(\d+)\s*秒', tool_args.get('reason', ''))
+            hibernate_duration = int(duration_match.group(1)) if duration_match else self.config.agent.awake_interval
+            debug.info(f"Agent 主动休眠 {hibernate_duration} 秒", tag="HIBERNATE")
+            time.sleep(hibernate_duration)
+            return (f"休眠 {hibernate_duration} 秒完成", "hibernated")
 
         # 工具超时配置（秒）
         TOOL_TIMEOUTS = {
-            "web_search_tool": 30,
-            "read_webpage_tool": 20,
-            "run_cmd_tool": 60,
-            "run_powershell_tool": 60,
-            "run_batch_tool": 120,
-            "backup_project_tool": 60,
-            "check_syntax_tool": 10,
-            "list_directory_tool": 10,
-            "read_local_file_tool": 10,
-            "edit_local_file_tool": 15,
-            "create_new_file_tool": 15,
-            "trigger_self_restart_tool": 30,
-            "read_memory_tool": 5,
-            "commit_compressed_memory_tool": 10,
-            "compress_context_tool": 30,
+            "web_search_tool": 30, "read_webpage_tool": 20, "run_cmd_tool": 60,
+            "run_powershell_tool": 60, "run_batch_tool": 120, "backup_project_tool": 60,
+            "check_syntax_tool": 10, "list_symbols_in_file_tool": 5, "list_directory_tool": 10,
+            "read_local_file_tool": 10, "edit_local_file_tool": 15, "create_new_file_tool": 15,
+            "trigger_self_restart_tool": 30, "read_memory_tool": 5, "commit_compressed_memory_tool": 10,
+            "read_generation_archive_tool": 10, "list_generation_archives_tool": 5,
+            "compress_context_tool": 30, "grep_search_tool": 30, "apply_diff_edit_tool": 15,
+            "validate_diff_format_tool": 5, "find_function_calls_tool": 30, "find_definitions_tool": 30,
+            "get_code_entity_tool": 15, "list_file_entities_tool": 10, "search_and_read_tool": 30,
         }
-        DEFAULT_TIMEOUT = 30  # 默认超时
+        DEFAULT_TIMEOUT = 30
 
         tool_func_map = {
             "web_search_tool": lambda: web_search(**tool_args),
@@ -995,52 +1714,60 @@ class SelfEvolvingAgent:
             "edit_local_file_tool": lambda: edit_local_file(**tool_args),
             "create_new_file_tool": lambda: create_new_file(**tool_args),
             "check_syntax_tool": lambda: check_syntax(**tool_args),
+            "list_symbols_in_file_tool": lambda: list_symbols_in_file(**tool_args),
             "backup_project_tool": lambda: backup_project(**tool_args),
+            "run_self_test_tool": lambda: run_self_test(),
+            "get_agent_status_tool": lambda: get_agent_status(),
+            "enter_hibernation_tool": lambda: enter_hibernation_tool(**tool_args),
+            "get_evolution_history_tool": lambda: get_evolution_history(**tool_args),
+            "get_evolution_stats_tool": lambda: get_evolution_stats(),
             "trigger_self_restart_tool": lambda: trigger_self_restart(**tool_args),
             "read_memory_tool": lambda: read_memory(**tool_args),
             "commit_compressed_memory_tool": lambda: commit_compressed_memory(**tool_args),
+            "read_generation_archive_tool": lambda: read_generation_archive(**tool_args),
+            "list_generation_archives_tool": lambda: list_archives(**tool_args),
             "run_cmd_tool": lambda: run_cmd(**tool_args),
             "run_powershell_tool": lambda: run_powershell(**tool_args),
             "run_batch_tool": lambda: run_batch(**tool_args),
+            "grep_search_tool": lambda: grep_search(**tool_args),
+            "apply_diff_edit_tool": lambda: apply_diff_edit(**tool_args),
+            "validate_diff_format_tool": lambda: validate_diff_format(**tool_args),
+            "find_function_calls_tool": lambda: find_function_calls(**tool_args),
+            "find_definitions_tool": lambda: find_definitions(**tool_args),
+            "get_code_entity_tool": lambda: get_code_entity(**tool_args),
+            "list_file_entities_tool": lambda: list_file_entities(**tool_args),
+            "search_and_read_tool": lambda: search_and_read(**tool_args),
         }
 
         if tool_name not in tool_func_map:
-            return f"[错误] 未知工具 {tool_name}"
+            return (f"[错误] 未知工具 {tool_name}", None)
 
         timeout = TOOL_TIMEOUTS.get(tool_name, DEFAULT_TIMEOUT)
 
         def _run_tool():
-            """执行工具的包装函数"""
             return tool_func_map[tool_name]()
 
         try:
-            # 使用线程池执行，带超时控制
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_run_tool)
                 result = future.result(timeout=timeout)
 
-            # 检测是否修改了自身代码
             if tool_name in ("edit_local_file_tool", "create_new_file_tool"):
                 file_path = tool_args.get("file_path", "")
                 if "agent.py" in file_path:
                     self._self_modified = True
-                    print(f"[检测] agent.py 已修改，将触发重启")
+                    debug.success("agent.py 已修改，将触发重启", tag="MODIFY")
 
-            return result
+            return (result, None)
 
         except FuturesTimeoutError:
-            # 超时处理
-            timeout_msg = (
-                f"[超时] 工具执行超时 ({timeout}秒)\n"
-                f"工具: {tool_name}\n"
-                f"参数: {str(tool_args)[:200]}\n"
-                f"建议: 尝试简化操作或使用更具体的参数"
-            )
-            print(f"[警告] {tool_name} 执行超时 ({timeout}秒)")
-            return timeout_msg
+            timeout_msg = f"[超时] 工具执行超时 ({timeout}秒)\n工具: {tool_name}\n参数: {str(tool_args)[:200]}\n建议: 尝试简化操作"
+            debug.warning(f"{tool_name} 执行超时 ({timeout}秒)", tag="TIMEOUT")
+            return (timeout_msg, None)
 
         except Exception as e:
-            return f"[错误] {str(e)}"
+            debug.error(f"工具执行异常: {type(e).__name__}: {e}", exc_info=True)
+            return (f"[错误] {str(e)}", None)
     
     def run_loop(self, initial_prompt: str = None) -> None:
         """
@@ -1051,14 +1778,21 @@ class SelfEvolvingAgent:
         Args:
             initial_prompt: 首次苏醒时的用户输入（可选）
         """
-        print(f"[{self.name}] 主循环开始")
+        debug.system(f"主循环开始 (awake_interval={self.config.agent.awake_interval}s)", tag=self.name)
+
+        # 记录会话开始
+        conversation_logger.start_session({
+            "generation": get_generation(),
+            "current_goal": get_current_goal(),
+            "model": self.model_name,
+            "awake_interval": self.config.agent.awake_interval,
+        })
 
         last_backup_time = time.time()
         is_first_iteration = initial_prompt is not None
 
         try:
-            memory_json = read_memory()
-            print(f"[记忆] G{get_generation()} | {get_current_goal()[:50]}")
+            debug.kv("记忆状态", f"G{get_generation()} | {get_current_goal()[:50]}")
 
             print_evolution_time()
             while True:
@@ -1077,20 +1811,25 @@ class SelfEvolvingAgent:
                     is_first_iteration = False
 
                 if not should_continue:
-                    print("[Agent] 重启已触发")
+                    debug.warning("重启已触发", tag="AGENT")
                     break
 
-                interval = self.config.agent.awake_interval
-                print(f"[休眠] {interval}秒...")
-                time.sleep(interval)
+                # 如果 Agent 已主动休眠，跳过被动休眠
+                if should_continue == "hibernated":
+                    debug.debug("Agent 已主动休眠，苏醒继续", tag="WAKE")
+                    continue
+
 
         except KeyboardInterrupt:
-            print("[Agent] 收到中断，退出")
+            debug.info("收到中断，退出", tag="AGENT")
+            conversation_logger.end_session({"reason": "keyboard_interrupt"})
         except Exception as e:
-            print(f"[错误] {e}")
+            debug.error(f"主循环异常: {type(e).__name__}: {e}", exc_info=True)
+            conversation_logger.log_error("main_loop_exception", str(e), traceback.format_exc())
         finally:
             uptime = datetime.now() - self.start_time
-            print(f"[Agent] 运行结束 ({uptime})")
+            debug.info(f"运行结束 (运行时长: {uptime})", tag=self.name)
+            conversation_logger.end_session({"uptime_seconds": uptime.total_seconds()})
 
 
 # ============================================================================
@@ -1186,23 +1925,25 @@ def main(initial_prompt: str = None):
 
     setup_logging(level=config.log.level)
 
-    print(f"[{config.agent.name}] 启动")
-    print(f"  模型: {config.llm.model_name} | 间隔: {config.agent.awake_interval}s")
+    debug.section(f"启动 {config.agent.name}")
+    debug.kv("模型", config.llm.model_name)
+    debug.kv("唤醒间隔", f"{config.agent.awake_interval}s")
+    debug.kv("自动备份", str(config.agent.auto_backup))
 
     try:
         api_key = config.get_api_key()
         if not api_key:
-            print("[错误] API Key 未设置!")
+            debug.error("API Key 未设置!", tag="CONFIG")
             sys.exit(1)
 
         agent = SelfEvolvingAgent(config=config)
-        print(f"  工具: {len(agent.tools)} 个")
-        print("-" * 40)
+        debug.kv("加载工具", f"{len(agent.tools)} 个")
+        debug.divider()
 
         agent.run_loop(initial_prompt=initial_prompt)
 
     except Exception as e:
-        print(f"[错误] {e}")
+        debug.error(f"启动异常: {type(e).__name__}: {e}", exc_info=True)
         sys.exit(1)
 
 
@@ -1212,7 +1953,7 @@ if __name__ == "__main__":
 
     if args.test:
         # 运行首次进化测试
-        print("[System] 运行首次进化测试模式")
+        debug.section("首次进化测试模式")
         main(initial_prompt=EVOLUTION_TEST_PROMPT)
     elif args.prompt:
         # 使用自定义提示运行

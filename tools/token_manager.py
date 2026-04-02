@@ -42,10 +42,10 @@ MAX_TOOL_RESULT_TOKENS = 400      # 单个工具结果最大 Token（优化）
 MAX_HISTORY_PAIRS = 3             # 保留的最大交互对数（优化）
 
 # 压缩阈值（优化）
-COMPRESSION_TRIGGER_RATIO = 0.60  # 触发压缩的 Token 比例（更早触发）
-COMPRESSION_WARNING_RATIO = 0.50  # 警告阈值（预压缩）
-COMPRESSION_CRITICAL_RATIO = 0.80 # 紧急压缩阈值
-COMPRESSION_TARGET_RATIO = 0.45   # 压缩后应达到的比例
+COMPRESSION_TRIGGER_RATIO = 0.75  # 触发压缩的 Token 比例（保守触发，避免频繁压缩）
+COMPRESSION_WARNING_RATIO = 0.65  # 警告阈值（预压缩）
+COMPRESSION_CRITICAL_RATIO = 0.85 # 紧急压缩阈值
+COMPRESSION_TARGET_RATIO = 0.55   # 压缩后应达到的比例
 
 # 摘要配置
 MINIMAL_SUMMARY_CHARS = 80        # 极简摘要最大字符数
@@ -81,7 +81,7 @@ class MessagePriority(IntEnum):
 @dataclass
 class TokenBudget:
     """Token 预算追踪器（增强版）"""
-    total_budget: int = DEFAULT_TOKEN_BUDGET
+    total_budget: int = field(default=DEFAULT_TOKEN_BUDGET)
     system_prompt_tokens: int = 0
     reserved_tokens: int = 0  # 预留空间
     
@@ -422,64 +422,82 @@ class EnhancedTokenCompressor:
         self,
         messages: List[Any],
         max_chars: int = CORE_SUMMARY_CHARS,
+        reason: str = "",
     ) -> Tuple[List[Any], str]:
         """
-        执行压缩。
+        执行压缩：保留最近3条原始AI回复 + 压缩旧消息为摘要。
+        
+        策略：
+        - 最近 3 条 AI 消息及其上下文保持原始不变
+        - 3 条之前的消息压缩成一条摘要
         
         Returns:
             (压缩后的消息, 摘要)
         """
         from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
-        from langchain_core.messages import AIMessage as LangChainAIMessage
         
         current_tokens = estimate_messages_tokens(messages)
         compression_type = self.get_compression_level(current_tokens)
         
-        # 分离消息
+        # 分离消息类型
         system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
         human_msgs = [m for m in messages if isinstance(m, HumanMessage)]
+        
+        # 提取所有非系统、非人类的普通消息
         other_msgs = [m for m in messages if not isinstance(m, (SystemMessage, HumanMessage))]
         
-        # 根据紧急程度调整保留对数
-        if compression_type == "emergency":
-            keep_pairs = 1
-        elif compression_type == "active":
-            keep_pairs = 2
+        # 找出所有 AI 消息（带 tool_calls 或纯文本回复）
+        ai_indices = []
+        for i, msg in enumerate(other_msgs):
+            if isinstance(msg, AIMessage) or (hasattr(msg, 'type') and msg.type == 'ai'):
+                ai_indices.append(i)
+        
+        if not ai_indices:
+            return messages, ""
+        
+        # 保留最近 3 条 AI 消息及其上下文
+        keep_count = 3
+        if len(ai_indices) <= keep_count:
+            # AI 消息太少，全部保留，只压缩 SystemMessage
+            kept_msgs = other_msgs
+            old_msgs = []
         else:
-            keep_pairs = self.max_history_pairs
+            # 分割点：保留最后 3 条 AI 及其后续消息
+            cutoff_idx = ai_indices[-keep_count]  # 第 N-2 条 AI 消息的索引
+            kept_msgs = other_msgs[cutoff_idx:]    # 从这里开始保留
+            old_msgs = other_msgs[:cutoff_idx]    # 之前的全部压缩
         
-        # 配对消息
-        pairs = self._pair_messages(other_msgs)
-        
-        # 分离要压缩的历史和保留的最近
-        recent_pairs = pairs[-keep_pairs:] if len(pairs) > keep_pairs else pairs
-        old_pairs = pairs[:-keep_pairs] if len(pairs) > keep_pairs else []
-        
-        # 生成摘要
+        # 生成旧消息的摘要
         summary = ""
-        if old_pairs:
-            old_messages = [msg for pair in old_pairs for msg in pair]
-            summary = self._generate_summary(old_messages, max_chars)
+        if old_msgs:
+            summary = self._generate_summary(old_msgs, max_chars)
         
-        # 重建消息
-        compressed = system_msgs[:1]  # 只保留一个 SystemMessage
+        # 重建消息结构
+        compressed = []
         
+        # 1. SystemMessage（只保留一个）
+        if system_msgs:
+            compressed.append(system_msgs[0])
+        
+        # 2. 最新的 HumanMessage
         if human_msgs:
             compressed.append(human_msgs[-1])
         
+        # 3. 历史摘要（如果有）
         if summary:
             compressed.append(HumanMessage(
                 content=f"\n[历史摘要] {summary}\n"
             ))
         
-        compressed.extend([msg for pair in recent_pairs for msg in pair])
+        # 4. 保留的最近 3 条 AI 及上下文（原始不变）
+        compressed.extend(kept_msgs)
         
-        # 记录
+        # 记录压缩统计
         old_tokens = current_tokens
         new_tokens = estimate_messages_tokens(compressed)
         self.stats.record(
             old_tokens, new_tokens, 
-            len(old_pairs), summary,
+            len(old_msgs), summary,
             compression_type
         )
         
@@ -511,6 +529,7 @@ class EnhancedTokenCompressor:
         self,
         messages: List[Any],
         max_chars: int,
+        reason: str = "",
     ) -> str:
         """生成摘要"""
         if not messages:
@@ -521,10 +540,22 @@ class EnhancedTokenCompressor:
         tools_used = set()
         files_modified = []
         errors = []
+        task_goals = []
+        key_decisions = []
         
         for msg in messages:
             content = getattr(msg, 'content', '')
             msg_type = getattr(msg, 'type', '')
+            
+            # 提取任务目标
+            if msg_type == 'human' and ('核心目标' in content or '主要任务' in content or '本世代目标' in content):
+                task_goals.append(content.strip())
+            elif msg_type == 'ai' and ('核心目标' in content or '主要任务' in content or '本世代目标' in content):
+                task_goals.append(content.strip())
+            
+            # 提取关键决策
+            if msg_type == 'ai' and ('决定' in content or '选择' in content or '确定' in content or '确认' in content):
+                key_decisions.append(content.strip())
             
             if msg_type == 'tool':
                 # 提取工具名
@@ -545,12 +576,21 @@ class EnhancedTokenCompressor:
                     tools_used.add(tc.get('name', '')[:20])
         
         # 构建摘要
+        # 根据压缩原因调整摘要重点
+        if reason:
+            summary_parts.append(f"压缩原因: {reason}")
+        
+        # 构建摘要 - 按重要性排序
+        if task_goals:
+            summary_parts.append(f"核心目标: {task_goals[-1][:100]}")
+        if key_decisions:
+            summary_parts.append(f"关键决策: {key_decisions[-1][:100]}")
         if tools_used:
-            summary_parts.append(f"使用: {', '.join(list(tools_used)[:5])}")
+            summary_parts.append(f"工具使用: {', '.join(list(tools_used)[:5])}")
         if files_modified:
             summary_parts.append(f"修改: {len(files_modified)} 个文件")
         if errors:
-            summary_parts.append(f"错误: {errors[0]}")
+            summary_parts.append(f"错误: {errors[0][:100]}")
         
         result = " | ".join(summary_parts) if summary_parts else "多轮对话"
         

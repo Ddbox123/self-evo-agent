@@ -21,8 +21,15 @@ from typing import Optional, List, Dict, Any
 # 配置
 # ============================================================================
 
+def _get_workspace_path() -> Path:
+    """获取工作区域路径"""
+    project_root = Path(__file__).parent.parent.resolve()
+    workspace = project_root / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return workspace
+
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-EVOLUTION_LOG_FILE = PROJECT_ROOT / "evolution_log.json"
+EVOLUTION_LOG_FILE = _get_workspace_path() / "evolution_log.json"
 
 # 最大记录条数（超过后自动清理）
 MAX_LOG_ENTRIES = 100

@@ -20,6 +20,8 @@ from tools.cmd_tools import (
     create_new_file,
     # 语法检查
     check_syntax,
+    # 符号感知
+    list_symbols_in_file,
     # 项目管理
     backup_project,
     # 系统命令
@@ -58,4 +60,39 @@ from tools.token_manager import (
     estimate_messages_tokens,
     MessagePriority,
     format_compression_report,
+)
+
+# 高级压缩工具
+from tools.advanced_compress_tool import advanced_compress_context_tool
+
+# 全局搜索工具 (Cursor/Aider 范式)
+from tools.search_tools import (
+    grep_search,
+    find_function_calls,
+    find_definitions,
+    search_imports,
+    search_and_read,
+)
+
+# Diff Block 编辑器 (Cursor/Aider 范式)
+from tools.code_tools import (
+    apply_diff_edit,
+    validate_diff_format,
+    preview_diff,
+)
+
+# AST 精准提取工具 (一击必中)
+from tools.ast_tools import (
+    get_code_entity,
+    list_file_entities,
+    get_file_entities,
+)
+
+# 瞬时记忆管理器 (阅后即焚)
+from tools.memory_cleanup import (
+    EphemeralMemoryManager,
+    get_memory_manager,
+    compress_message_history,
+    filter_exploration_messages,
+    cleanup_after_success,
 )

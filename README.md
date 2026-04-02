@@ -15,11 +15,12 @@ self-evo-agent/
 ├── requirements.txt      # Python 依赖
 ├── README.md             # 项目文档
 ├── tools/                # 工具模块
-│   ├── __init__.py       # 模块初始化
+│   ├── __init__.py       # 模块初始化（统一导出）
 │   ├── web_tools.py      # 网络搜索和网页读取
-│   ├── file_tools.py     # 文件和目录操作
-│   ├── code_tools.py     # 代码编辑工具
-│   ├── safety_tools.py   # 语法检查和备份
+│   ├── cmd_tools.py      # CMD执行、文件操作、代码编辑
+│   ├── memory_tools.py   # 记忆与世代管理
+│   ├── evolution_tracker.py  # 进化追踪
+│   ├── token_manager.py  # Token压缩管理
 │   └── rebirth_tools.py  # 自我重启触发
 └── backups/              # 项目备份目录
 ```

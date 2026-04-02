@@ -9,13 +9,14 @@
 provider = "aliyun"
 # 模型名称（阿里云百炼模型列表: https://help.aliyun.com/model-studio/getting-started/models）
 # 推荐: qwen-plus, qwen-turbo, qwen-max, qwen-coder-plus
-model_name = "qwen-plus"
+model_name = "qwen-32b-awq"
 # API Key（直接从阿里云百炼控制台获取）
-api_key = "sk-50d93a5673154076b3f1a19bd58e7e4f"
-# API 端点（阿里云百炼专用）
-api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# api_key = "sk-50d93a5673154076b3f1a19bd58e7e4f"
+api_key ="EMPTY"
+# API 端点
+api_base = "http://localhost:8000/v1"
 # 温度参数 (0.0-2.0)
-temperature = 0.7
+temperature = 0.2
 # 最大输出 tokens
 max_tokens = 4096
 # API 超时时间（秒）
@@ -30,7 +31,8 @@ name = "SelfEvolvingAgent"
 # 工作区域 - 所有生成的文件都在此目录下（相对于项目根目录）
 workspace = "workspace"
 # 苏醒间隔（秒）- Agent 每隔多久苏醒一次进行思考
-awake_interval = 10
+# 建议：简单任务用 60 秒，复杂任务用 300 秒
+awake_interval = 1
 # 单次苏醒的最大工具调用次数
 max_iterations = 100
 # 最大运行时间（秒），0 表示无限制
@@ -38,7 +40,7 @@ max_runtime = 0
 # 是否自动备份
 auto_backup = true
 # 自动备份间隔（秒）
-backup_interval = 300
+backup_interval = 3000
 # 自动重启阈值，0 表示不自动重启
 auto_restart_threshold = 0
 
@@ -49,13 +51,13 @@ auto_restart_threshold = 0
 # 启用运行时上下文压缩
 enabled = true
 # Token 阈值，超过此值触发压缩（建议设为模型 context window 的 50-70%）
-max_token_limit = 6000
+max_token_limit = 20000
 # 保留最近的工具调用次数（让模型知道自己最近在干嘛）
 keep_recent_steps = 2
 # 压缩摘要的最大字数
 summary_max_chars = 200
 # 压缩用模型（建议用更轻量的模型以节省成本）
-compression_model = "qwen-turbo"
+compression_model = "qwen-32b-awq"
 
 # ============================================================
 # 工具配置
