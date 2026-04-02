@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Observer Dashboard - 自我进化 Agent 监控面板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 赛博极客风格自定义样式 */
+        :root {
+            --neon-green: #00ff41;
+            --neon-cyan: #00d4ff;
+            --neon-pink: #ff0080;
+            --neon-purple: #bf00ff;
+            --neon-yellow: #ffff00;
+            --dark-bg: #0a0a0f;
+            --panel-bg: rgba(10, 10, 20, 0.9);
+        }
+
+        * {
+            font-family: 'Courier New', 'Consolas', monospace;
+        }
+
+        body {
+            background: var(--dark-bg);
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+
+        /* 扫描线效果 */
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.1) 0px,
+                rgba(0, 0, 0, 0.1) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            z-index: 9999;
+        }
+
+        /* 呼吸指示灯 */
+        .breathing-light {
+            animation: breathe 2s ease-in-out infinite;
+        }
+
+        @keyframes breathe {
+            0%, 100% {
+                opacity: 0.3;
+                box-shadow: 0 0 5px currentColor, 0 0 10px currentColor;
+            }
+            50% {
+                opacity: 1;
+                box-shadow: 0 0 15px currentColor, 0 0 30px currentColor, 0 0 45px currentColor;
+            }
+        }
+
+        /* 霓虹发光文字 */
+        .neon-text {
+            text-shadow: 0 0 5px currentColor, 0 0 10px currentColor, 0 0 20px currentColor;
+        }
+
+        /* 面板玻璃效果 */
+        .glass-panel {
+            background: var(--panel-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 255, 65, 0.2);
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1), inset 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+
+        /* 终端滚动条 */
+        .terminal-scroll::-webkit-scrollbar {
+            width: 8px;
+        }
+        .terminal-scroll::-webkit-scrollbar-track {
+            background: #1a1a2e;
+        }
+        .terminal-scroll::-webkit-scrollbar-thumb {
+            background: var(--neon-green);
+            border-radius: 4px;
+        }
+
+        /* 状态颜色 */
+        .status-IDLE { color: #808080; }
+        .status-AWAKENING { color: var(--neon-yellow); }
+        .status-THINKING { color: var(--neon-cyan); }
+        .status-SEARCHING { color: #ff9500; }
+        .status-PLANNING { color: var(--neon-purple); }
+        .status-CODING { color: var(--neon-green); }
+        .status-TESTING { color: #00ff88; }
+        .status-COMPRESSING { color: #88ff00; }
+        .status-RESTARTING { color: var(--neon-pink); }
+        .status-HIBERNATING { color: #4488ff; }
+        .status-ERROR { color: #ff3333; }
+
+        /* 边框发光效果 */
+        .glow-border {
+            border: 1px solid rgba(0, 255, 65, 0.3);
+            transition: all 0.3s ease;
+        }
+        .glow-border:hover {
+            border-color: rgba(0, 255, 65, 0.8);
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
+        }
+
+        /* 加载动画 */
+        .loading-dots::after {
+            content: '';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+        @keyframes dots {
+            0% { content: ''; }
+            25% { content: '.'; }
+            50% { content: '..'; }
+            75% { content: '...'; }
+            100% { content: ''; }
+        }
+
+        /* 日志条目动画 */
+        .log-entry {
+            animation: fadeIn 0.3s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* 进度条动画 */
+        .progress-bar {
+            background: linear-gradient(90deg, var(--neon-green), var(--neon-cyan));
+            animation: progressGlow 2s ease-in-out infinite;
+        }
+        @keyframes progressGlow {
+            0%, 100% { opacity: 0.8; }
+            50% { opacity: 1; }
+        }
+
+        /* 标签样式 */
+        .tag {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: rgba(0, 255, 65, 0.2);
+            color: var(--neon-green);
+        }
+        .tag-WARN { background: rgba(255, 200, 0, 0.2); color: #ffcc00; }
+        .tag-ERROR { background: rgba(255, 50, 50, 0.2); color: #ff3333; }
+        .tag-TOOL { background: rgba(0, 212, 255, 0.2); color: var(--neon-cyan); }
+        .tag-LLM { background: rgba(191, 0, 255, 0.2); color: var(--neon-purple); }
+        .tag-START, .tag-RESTART, .tag-SHUTDOWN { background: rgba(255, 0, 128, 0.2); color: var(--neon-pink); }
+        .tag-SLEEP { background: rgba(68, 136, 255, 0.2); color: #4488ff; }
+    </style>
+</head>
+<body class="min-h-screen">
+    <!-- 顶部状态栏 -->
+    <header class="glass-panel m-4 p-4 rounded-lg">
+        <div class="flex items-center justify-between">
+            <!-- 左侧：Logo 和标题 -->
+            <div class="flex items-center gap-4">
+                <div class="text-3xl font-bold neon-text text-green-400">
+                    OBSERVER
+                </div>
+                <div class="text-sm text-gray-500">
+                    Self-Evolving Agent Dashboard
+                </div>
+            </div>
+
+            <!-- 中间：世代显示 -->
+            <div class="flex items-center gap-8">
+                <div class="text-center">
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">Generation</div>
+                    <div id="generation" class="text-5xl font-bold text-cyan-400 neon-text">
+                        G<span id="gen-number">?</span>
+                    </div>
+                </div>
+
+                <!-- 状态指示灯 -->
+                <div class="flex flex-col items-center gap-2">
+                    <div id="status-indicator"
+                         class="breathing-light w-6 h-6 rounded-full bg-gray-500 border-2 border-gray-500">
+                    </div>
+                    <div id="status-text" class="text-xl font-bold uppercase tracking-wider text-gray-400">
+                        INITIALIZING
+                    </div>
+                </div>
+
+                <!-- 迭代计数 -->
+                <div class="text-center">
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">Iteration</div>
+                    <div id="iteration" class="text-2xl font-bold text-purple-400">
+                        <span id="iter-count">0</span>
+                    </div>
+                </div>
+
+                <!-- 工具计数 -->
+                <div class="text-center">
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">Tools</div>
+                    <div id="tools-count" class="text-2xl font-bold text-yellow-400">
+                        <span id="tools-executed">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧：时间和控制 -->
+            <div class="flex items-center gap-4">
+                <!-- Agent 控制按钮 -->
+                <div class="flex items-center gap-2 px-3 py-2 glass-panel rounded-lg">
+                    <div id="agent-status" class="flex items-center gap-2">
+                        <span id="agent-indicator" class="w-3 h-3 rounded-full bg-gray-500"></span>
+                        <span id="agent-status-text" class="text-sm text-gray-400">Agent: 检测中</span>
+                    </div>
+                    <button id="btn-agent-start"
+                            class="px-3 py-1 bg-green-600 hover:bg-green-500 text-white text-sm rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                        启动
+                    </button>
+                    <button id="btn-agent-stop"
+                            class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white text-sm rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                        停止
+                    </button>
+                </div>
+
+                <!-- Dashboard 控制 -->
+                <button id="btn-dashboard-stop"
+                        class="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded transition-colors"
+                        title="关闭面板">
+                    退出
+                </button>
+
+                <div class="text-right">
+                    <div id="uptime" class="text-sm text-gray-500">
+                        Uptime: <span id="uptime-value">00:00:00</span>
+                    </div>
+                    <div id="last-update" class="text-xs text-gray-600">
+                        Last: <span id="last-update-value">--:--:--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主体内容 -->
+    <main class="grid grid-cols-12 gap-4 m-4 h-[calc(100vh-180px)]">
+        <!-- 左侧面板：The Mind -->
+        <aside class="col-span-3 flex flex-col gap-4">
+            <!-- 核心智慧 -->
+            <div class="glass-panel glow-border rounded-lg p-4 flex-1 overflow-hidden">
+                <h2 class="text-lg font-bold text-green-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-green-400 rounded-full"></span>
+                    THE MIND
+                </h2>
+                <div id="core-context" class="text-sm text-gray-300 overflow-y-auto h-[calc(100%-30px)] terminal-scroll">
+                    <div class="text-gray-500 italic">加载中<span class="loading-dots"></span></div>
+                </div>
+            </div>
+
+            <!-- 当前目标 -->
+            <div class="glass-panel glow-border rounded-lg p-4">
+                <h2 class="text-lg font-bold text-cyan-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-cyan-400 rounded-full"></span>
+                    CURRENT GOAL
+                </h2>
+                <div id="current-goal" class="text-sm text-gray-300">
+                    <span class="text-gray-500 italic">暂无目标</span>
+                </div>
+            </div>
+
+            <!-- Token 预算 -->
+            <div class="glass-panel glow-border rounded-lg p-4">
+                <h2 class="text-lg font-bold text-purple-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-purple-400 rounded-full"></span>
+                    TOKEN BUDGET
+                </h2>
+                <div id="token-budget" class="text-sm text-gray-300">
+                    <div class="flex justify-between mb-1">
+                        <span>Used</span>
+                        <span id="token-used">0</span>
+                    </div>
+                    <div class="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                        <div id="token-progress" class="progress-bar h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                    <div class="flex justify-between mt-1 text-xs text-gray-500">
+                        <span>0</span>
+                        <span id="token-total">~8K</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 状态历史 -->
+            <div class="glass-panel glow-border rounded-lg p-4">
+                <h2 class="text-lg font-bold text-yellow-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-yellow-400 rounded-full"></span>
+                    RECENT ACTIONS
+                </h2>
+                <div id="action-history" class="text-xs text-gray-400 space-y-1 max-h-32 overflow-y-auto terminal-scroll">
+                    <div class="text-gray-600 italic">等待活动...</div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 中间面板：The Plan -->
+        <section class="col-span-6 flex flex-col">
+            <div class="glass-panel glow-border rounded-lg p-4 flex-1 flex flex-col overflow-hidden">
+                <h2 class="text-lg font-bold text-pink-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-pink-400 rounded-full"></span>
+                    THE PLAN
+                </h2>
+                <div id="plan-content" class="flex-1 overflow-y-auto terminal-scroll text-sm">
+                    <pre id="plan-text" class="whitespace-pre-wrap text-gray-300 leading-relaxed">暂无计划内容</pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- 右侧面板：The Matrix (终端日志) -->
+        <aside class="col-span-3 flex flex-col">
+            <div class="glass-panel glow-border rounded-lg p-4 flex-1 flex flex-col overflow-hidden">
+                <h2 class="text-lg font-bold text-red-400 neon-text mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 bg-red-400 rounded-full breathing-light"></span>
+                    THE MATRIX
+                </h2>
+
+                <!-- 连接状态 -->
+                <div class="flex items-center justify-between mb-2 text-xs">
+                    <div class="flex items-center gap-2">
+                        <span id="log-status" class="text-gray-500">连接中<span class="loading-dots"></span></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span id="log-count" class="text-gray-600">0 条日志</span>
+                        <button id="clear-logs" class="text-gray-500 hover:text-red-400 transition-colors">清空</button>
+                    </div>
+                </div>
+
+                <!-- 日志容器 -->
+                <div id="log-container"
+                     class="flex-1 overflow-y-auto terminal-scroll bg-black/50 rounded p-2 font-mono text-xs space-y-1">
+                    <div class="log-entry text-gray-500">[$] 等待 Agent 日志...</div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script>
+        // =============================================
+        // Observer Dashboard - 实时监控脚本
+        // =============================================
+
+        // 状态管理
+        const state = {
+            wsConnected: false,
+            logCount: 0,
+            actionHistory: [],
+            startTime: Date.now(),
+        };
+
+        // DOM 元素
+        const elements = {
+            genNumber: document.getElementById('gen-number'),
+            statusIndicator: document.getElementById('status-indicator'),
+            statusText: document.getElementById('status-text'),
+            iterCount: document.getElementById('iter-count'),
+            toolsExecuted: document.getElementById('tools-executed'),
+            uptimeValue: document.getElementById('uptime-value'),
+            lastUpdateValue: document.getElementById('last-update-value'),
+            coreContext: document.getElementById('core-context'),
+            currentGoal: document.getElementById('current-goal'),
+            tokenUsed: document.getElementById('token-used'),
+            tokenProgress: document.getElementById('token-progress'),
+            actionHistory: document.getElementById('action-history'),
+            planText: document.getElementById('plan-text'),
+            logContainer: document.getElementById('log-container'),
+            logStatus: document.getElementById('log-status'),
+            logCount: document.getElementById('log-count'),
+            clearLogs: document.getElementById('clear-logs'),
+        };
+
+        // 状态颜色映射
+        const statusColors = {
+            'IDLE': '#808080',
+            'AWAKENING': '#ffff00',
+            'THINKING': '#00d4ff',
+            'SEARCHING': '#ff9500',
+            'PLANNING': '#bf00ff',
+            'CODING': '#00ff41',
+            'TESTING': '#00ff88',
+            'COMPRESSING': '#88ff00',
+            'RESTARTING': '#ff0080',
+            'HIBERNATING': '#4488ff',
+            'ERROR': '#ff3333',
+        };
+
+        // 格式化时间
+        function formatUptime(ms) {
+            const seconds = Math.floor(ms / 1000);
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function formatTime(isoString) {
+            try {
+                const date = new Date(isoString);
+                return date.toLocaleTimeString('zh-CN', { hour12: false });
+            } catch {
+                return '--:--:--';
+            }
+        }
+
+        // 更新 Uptime
+        function updateUptime() {
+            const elapsed = Date.now() - state.startTime;
+            elements.uptimeValue.textContent = formatUptime(elapsed);
+        }
+        setInterval(updateUptime, 1000);
+
+        // 添加日志条目
+        function addLog(message) {
+            const container = elements.logContainer;
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+
+            // 解析日志标签
+            const tagMatch = message.match(/\[([^\]]+)\]/g);
+            let tag = '';
+            let content = message;
+
+            if (tagMatch && tagMatch.length > 0) {
+                // 提取最后一个标签作为主要标签
+                tag = tagMatch[tagMatch.length - 1].replace(/[\[\]]/g, '');
+                content = message.replace(/\[([^\]]+)\]/g, '').trim();
+            }
+
+            // 添加标签样式
+            let tagHtml = '';
+            if (tag) {
+                const tagClass = tag.startsWith('WARN') ? 'tag-WARN' :
+                                 tag.startsWith('ERROR') ? 'tag-ERROR' :
+                                 tag === 'TOOL' ? 'tag-TOOL' :
+                                 tag === 'LLM' ? 'tag-LLM' :
+                                 ['START', 'RESTART', 'SHUTDOWN'].includes(tag) ? 'tag-START' :
+                                 tag === 'SLEEP' ? 'tag-SLEEP' : '';
+                tagHtml = `<span class="tag ${tagClass} mr-2">${tag}</span>`;
+            }
+
+            entry.innerHTML = `<span class="text-gray-600 mr-2">$</span>${tagHtml}<span class="text-gray-300">${escapeHtml(content)}</span>`;
+            container.appendChild(entry);
+
+            // 滚动到底部
+            container.scrollTop = container.scrollHeight;
+
+            // 限制日志数量
+            state.logCount++;
+            while (container.children.length > 200) {
+                container.removeChild(container.firstChild);
+            }
+            elements.logCount.textContent = `${state.logCount} 条日志`;
+        }
+
+        // HTML 转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 更新 Agent 状态
+        function updateAgentState(data) {
+            // 世代
+            if (data.generation !== undefined) {
+                elements.genNumber.textContent = data.generation;
+            }
+
+            // 状态
+            const status = data.status || 'UNKNOWN';
+            const color = statusColors[status] || '#808080';
+            elements.statusIndicator.style.backgroundColor = color;
+            elements.statusIndicator.style.borderColor = color;
+            elements.statusIndicator.style.boxShadow = `0 0 10px ${color}`;
+            elements.statusText.textContent = status;
+            elements.statusText.className = `text-xl font-bold uppercase tracking-wider status-${status}`;
+
+            // 迭代计数
+            if (data.iteration_count !== undefined) {
+                elements.iterCount.textContent = data.iteration_count;
+            }
+
+            // 工具计数
+            if (data.tools_executed !== undefined) {
+                elements.toolsExecuted.textContent = data.tools_executed;
+            }
+
+            // 最后更新时间
+            if (data.last_update) {
+                elements.lastUpdateValue.textContent = formatTime(data.last_update);
+            }
+
+            // 核心上下文
+            if (data.core_context_preview) {
+                elements.coreContext.innerHTML = `<div class="text-gray-300">${escapeHtml(data.core_context_preview)}</div>`;
+            }
+
+            // 当前目标
+            if (data.current_goal) {
+                elements.currentGoal.innerHTML = `<div class="text-gray-200">${escapeHtml(data.current_goal)}</div>`;
+            }
+
+            // Token 预算
+            if (data.token_budget !== undefined) {
+                const budget = data.token_budget;
+                const maxBudget = 8000;
+                const percentage = Math.min((budget / maxBudget) * 100, 100);
+                elements.tokenUsed.textContent = `~${budget}`;
+                elements.tokenProgress.style.width = `${percentage}%`;
+            }
+
+            // 动作历史
+            if (data.current_action && !state.actionHistory.includes(data.current_action)) {
+                state.actionHistory.unshift(data.current_action);
+                if (state.actionHistory.length > 10) state.actionHistory.pop();
+
+                elements.actionHistory.innerHTML = state.actionHistory
+                    .map(action => `<div class="truncate">${escapeHtml(action)}</div>`)
+                    .join('');
+            }
+        }
+
+        // 加载初始数据
+        async function loadInitialData() {
+            try {
+                const response = await fetch('/api/data');
+                const data = await response.json();
+
+                if (data.state) {
+                    updateAgentState(data.state);
+                    state.startTime = Date.now() - (data.state.uptime_seconds || 0) * 1000;
+                }
+
+                if (data.plan) {
+                    elements.planText.textContent = data.plan;
+                }
+
+                if (data.memory) {
+                    // 从 memory 中提取核心上下文
+                    const context = data.memory.core_context || data.memory.core_context_preview || '';
+                    if (context) {
+                        elements.coreContext.innerHTML = `<div class="text-gray-300">${escapeHtml(context)}</div>`;
+                    }
+                }
+            } catch (error) {
+                console.error('加载初始数据失败:', error);
+            }
+        }
+
+        // WebSocket 连接 - 日志
+        function connectLogsWS() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                state.wsConnected = true;
+                elements.logStatus.innerHTML = '<span class="text-green-400">●</span> 已连接';
+                addLog('[系统] 已连接到日志流');
+            };
+
+            ws.onmessage = (event) => {
+                const data = event.data;
+                if (typeof data === 'string') {
+                    addLog(data);
+                } else if (data.type === 'connected') {
+                    addLog(`[系统] ${data.message}`);
+                }
+            };
+
+            ws.onclose = () => {
+                state.wsConnected = false;
+                elements.logStatus.innerHTML = '<span class="text-red-400">●</span> 连接断开，5秒后重连...';
+                addLog('[系统] 连接断开，正在重连...');
+                setTimeout(connectLogsWS, 5000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket 错误:', error);
+                elements.logStatus.innerHTML = '<span class="text-yellow-400">●</span> 连接错误';
+            };
+        }
+
+        // WebSocket 连接 - 状态
+        function connectStateWS() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/state`;
+
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                addLog('[系统] 已连接到状态流');
+            };
+
+            ws.onmessage = (event) => {
+                const data = event.data;
+                if (typeof data === 'object') {
+                    updateAgentState(data);
+                }
+            };
+
+            ws.onclose = () => {
+                setTimeout(connectStateWS, 5000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('状态 WebSocket 错误:', error);
+            };
+        }
+
+        // 清空日志
+        elements.clearLogs.addEventListener('click', () => {
+            elements.logContainer.innerHTML = '<div class="log-entry text-gray-500">[$] 日志已清空</div>';
+            state.logCount = 0;
+            elements.logCount.textContent = '0 条日志';
+        });
+
+        // 页面关闭时自动停止服务器
+        let wsLogs = null;
+        let wsState = null;
+
+        // Agent 状态
+        let agentRunning = false;
+        let agentPid = null;
+
+        function sendShutdown() {
+            fetch('/api/shutdown', { method: 'POST' })
+                .then(() => console.log('Shutdown request sent'))
+                .catch(() => console.log('Shutdown request failed'));
+        }
+
+        // 获取 Agent 状态
+        async function fetchAgentStatus() {
+            try {
+                const resp = await fetch('/api/agent/status');
+                const data = await resp.json();
+                updateAgentUI(data);
+            } catch (e) {
+                console.error('获取 Agent 状态失败:', e);
+            }
+        }
+
+        // 更新 Agent UI
+        function updateAgentUI(data) {
+            const indicator = document.getElementById('agent-indicator');
+            const statusText = document.getElementById('agent-status-text');
+            const btnStart = document.getElementById('btn-agent-start');
+            const btnStop = document.getElementById('btn-agent-stop');
+
+            agentRunning = data.running;
+            agentPid = data.pid;
+
+            if (data.running) {
+                indicator.className = 'w-3 h-3 rounded-full bg-green-500';
+                statusText.textContent = `Agent: 运行中 (PID: ${data.pid})`;
+                btnStart.disabled = true;
+                btnStop.disabled = false;
+            } else {
+                indicator.className = 'w-3 h-3 rounded-full bg-gray-500';
+                statusText.textContent = 'Agent: 未运行';
+                btnStart.disabled = false;
+                btnStop.disabled = true;
+            }
+        }
+
+        // 启动 Agent
+        async function startAgent() {
+            const btn = document.getElementById('btn-agent-start');
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+
+            try {
+                const resp = await fetch('/api/agent/start', { method: 'POST' });
+                const data = await resp.json();
+
+                if (data.status === 'started') {
+                    addLog('[系统] Agent 已启动 (PID: ' + data.pid + ')');
+                    agentPid = data.pid;
+                } else {
+                    addLog('[系统] ' + data.message);
+                }
+                await fetchAgentStatus();
+            } catch (e) {
+                addLog('[错误] 启动 Agent 失败: ' + e.message);
+            }
+
+            btn.textContent = '启动';
+        }
+
+        // 停止 Agent
+        async function stopAgent() {
+            const btn = document.getElementById('btn-agent-stop');
+            btn.disabled = true;
+            btn.textContent = '停止中...';
+
+            try {
+                const resp = await fetch('/api/agent/stop', { method: 'POST' });
+                const data = await resp.json();
+
+                addLog('[系统] ' + data.message);
+                await fetchAgentStatus();
+            } catch (e) {
+                addLog('[错误] 停止 Agent 失败: ' + e.message);
+            }
+
+            btn.textContent = '停止';
+        }
+
+        // 页面卸载时发送关闭请求
+        window.addEventListener('beforeunload', (event) => {
+            sendShutdown();
+            // 同步关闭（Chrome 需要）
+            navigator.sendBeacon('/api/shutdown');
+        });
+
+        // 页面可见性变化时检测（移动端标签切换）
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                // 页面隐藏时可能也要关闭（可选）
+                // sendShutdown();
+            }
+        });
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            loadInitialData();
+            connectLogsWS();
+            connectStateWS();
+            fetchAgentStatus(); // 获取 Agent 状态
+
+            // Agent 控制按钮
+            document.getElementById('btn-agent-start').addEventListener('click', startAgent);
+            document.getElementById('btn-agent-stop').addEventListener('click', stopAgent);
+
+            // Dashboard 退出按钮
+            document.getElementById('btn-dashboard-stop').addEventListener('click', () => {
+                if (confirm('确定要关闭监控面板吗？')) {
+                    sendShutdown();
+                    window.close();
+                }
+            });
+
+            // 定期检查 Agent 状态
+            setInterval(fetchAgentStatus, 5000);
+        });
+    </script>
+</body>
+</html>

@@ -860,3 +860,238 @@ def get_agent_status() -> str:
         "=" * 50,
     ]
     return '\n'.join(lines)
+
+
+# ============================================================================
+# 文件删除（自动清理测试文件）
+# ============================================================================
+
+# 允许删除的目录（仅允许删除测试相关目录，防止误删重要文件）
+ALLOWED_DELETE_DIRS = [
+    os.path.dirname(os.path.abspath(__file__)),  # tools/
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # 项目根目录
+]
+
+# 禁止删除的文件/目录模式
+FORBIDDEN_DELETE_PATTERNS = [
+    '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
+    'config.py', 'config.toml', '.git', 'restarter.py', 'agent.py',
+    '__pycache__', '.pytest_cache', '.gitignore',
+]
+
+# 允许删除的文件类型（测试相关文件）
+ALLOWED_DELETE_EXTENSIONS = {
+    '.py',  # 测试文件
+    '.txt', '.log', '.json',  # 测试生成的临时文件
+    '.tmp', '.bak', '.backup',  # 备份文件
+}
+
+
+def delete_file(file_path: str, force: bool = False) -> str:
+    """
+    删除指定的文件或目录。
+
+    【好习惯】完成测试任务后，自动清理测试产生的临时文件。
+    保持工作目录整洁，避免垃圾文件堆积。
+
+    Args:
+        file_path: 要删除的文件或目录路径
+        force: 是否强制删除（跳过部分安全检查，仅用于确认安全的临时文件）
+
+    Returns:
+        操作结果描述
+    """
+    if not file_path or not isinstance(file_path, str):
+        return "[删除文件] 错误: 路径不能为空"
+
+    file_path = file_path.strip()
+    if not file_path:
+        return "[删除文件] 错误: 路径不能为空"
+
+    try:
+        abs_path = Path(file_path).resolve()
+    except Exception as e:
+        return f"[删除文件] 错误: 无效的路径 - {e}"
+
+    # 检查路径是否在允许范围内
+    is_allowed_dir = False
+    for allowed_dir in ALLOWED_DELETE_DIRS:
+        allowed_abs = os.path.abspath(allowed_dir)
+        if str(abs_path).startswith(allowed_abs):
+            is_allowed_dir = True
+            break
+
+    if not is_allowed_dir:
+        return f"[删除文件] 错误: 路径超出允许范围 - {abs_path}"
+
+    # 检查禁止删除的模式
+    abs_str_lower = str(abs_path).lower()
+    for pattern in FORBIDDEN_DELETE_PATTERNS:
+        if pattern.lower() in abs_str_lower:
+            return f"[删除文件] 错误: 禁止删除受保护的文件/目录 - {abs_path.name}"
+
+    # 非强制模式下，检查文件类型
+    if not force and abs_path.is_file():
+        ext = abs_path.suffix.lower()
+        if ext not in ALLOWED_DELETE_EXTENSIONS and ext:
+            return f"[删除文件] 错误: 不允许删除此类型文件 - {ext} (force=True 可强制删除)"
+
+    # 检查文件/目录是否存在
+    if not abs_path.exists():
+        return f"[删除文件] 错误: 文件/目录不存在 - {abs_path}"
+
+    try:
+        deleted_items = []
+
+        if abs_path.is_file():
+            # 删除单个文件
+            size = abs_path.stat().st_size
+            abs_path.unlink()
+            deleted_items.append(f"  [文件] {abs_path.name} ({size} 字节)")
+        elif abs_path.is_dir():
+            # 删除目录及其内容
+            total_files = sum(1 for _ in abs_path.rglob('*') if _.is_file())
+            shutil.rmtree(abs_path)
+            deleted_items.append(f"  [目录] {abs_path.name}/ ({total_files} 个文件)")
+
+        result = [
+            "=" * 50,
+            "[删除文件] 成功",
+            f"路径: {abs_path}",
+            *deleted_items,
+            "=" * 50,
+            "【好习惯】测试文件已清理完毕，保持工作目录整洁！",
+            "=" * 50,
+        ]
+        return '\n'.join(result)
+
+    except PermissionError:
+        return f"[删除文件] 错误: 权限不足 - {abs_path}"
+    except Exception as e:
+        return f"[删除文件] 错误: {str(e)}"
+
+
+def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
+    """
+    清理指定目录下的测试相关临时文件。
+
+    【好习惯】定期清理测试产生的临时文件，避免垃圾堆积。
+
+    Args:
+        directory: 要扫描的目录，默认为当前目录
+        dry_run: 是否仅模拟运行（不实际删除）
+
+    Returns:
+        操作结果描述，包含找到的可删除文件列表
+    """
+    if not directory or not isinstance(directory, str):
+        return "[清理测试文件] 错误: 目录路径不能为空"
+
+    try:
+        abs_dir = Path(directory).resolve()
+    except Exception as e:
+        return f"[清理测试文件] 错误: 无效的路径 - {e}"
+
+    if not abs_dir.exists():
+        return f"[清理测试文件] 错误: 目录不存在 - {abs_dir}"
+
+    if not abs_dir.is_dir():
+        return f"[清理测试文件] 错误: 路径不是目录 - {abs_dir}"
+
+    # 要清理的文件/目录模式
+    CLEANUP_PATTERNS = [
+        '**/test_*.py',  # 测试文件
+        '**/__pycache__',
+        '**/*.pyc',
+        '**/*.pyo',
+        '**/.pytest_cache',
+        '**/*.tmp',
+        '**/*.log',
+        '**/workspace/backups/*',  # 过期的备份文件
+    ]
+
+    found_files = []
+    protected_files = []
+
+    try:
+        for pattern in CLEANUP_PATTERNS:
+            for item in abs_dir.glob(pattern):
+                # 跳过禁止删除的路径
+                is_protected = False
+                for protected in FORBIDDEN_DELETE_PATTERNS:
+                    if protected.lower() in str(item).lower():
+                        is_protected = True
+                        break
+
+                if is_protected:
+                    protected_files.append(str(item))
+                    continue
+
+                # 跳过必要文件
+                if item.name in ['agent.py', 'config.py', 'restarter.py']:
+                    protected_files.append(str(item))
+                    continue
+
+                found_files.append(item)
+
+        if not found_files:
+            result = [
+                "[清理测试文件] 未找到需要清理的文件",
+                f"扫描目录: {abs_dir}",
+            ]
+            return '\n'.join(result)
+
+        # 统计大小
+        total_size = sum(f.stat().st_size for f in found_files if f.is_file())
+
+        result = [
+            "=" * 50,
+            "[清理测试文件] 扫描结果",
+            f"扫描目录: {abs_dir}",
+            f"找到文件: {len(found_files)} 个",
+            f"总大小: {total_size / 1024:.1f} KB",
+            "",
+            "[可清理文件]",
+        ]
+
+        for f in found_files[:20]:  # 最多显示20个
+            if f.is_file():
+                size = f.stat().st_size
+                result.append(f"  {f.relative_to(abs_dir)} ({size} 字节)")
+            else:
+                result.append(f"  {f.relative_to(abs_dir)}/ (目录)")
+
+        if len(found_files) > 20:
+            result.append(f"  ... 还有 {len(found_files) - 20} 个文件")
+
+        if protected_files:
+            result.append("")
+            result.append("[受保护文件] (跳过)")
+            for pf in protected_files[:10]:
+                result.append(f"  {pf}")
+
+        result.append("=" * 50)
+
+        if dry_run:
+            result.append("[提示] 这是模拟运行，文件未被实际删除")
+            result.append("如需删除，请使用 delete_file_tool 逐个删除")
+        else:
+            # 执行删除
+            deleted_count = 0
+            for f in found_files:
+                try:
+                    if f.is_file():
+                        f.unlink()
+                    else:
+                        shutil.rmtree(f)
+                    deleted_count += 1
+                except Exception as e:
+                    result.append(f"  警告: 删除失败 {f.name} - {e}")
+
+            result.append(f"[完成] 已删除 {deleted_count}/{len(found_files)} 个文件")
+
+        result.append("=" * 50)
+        return '\n'.join(result)
+
+    except Exception as e:
+        return f"[清理测试文件] 错误: {str(e)}"

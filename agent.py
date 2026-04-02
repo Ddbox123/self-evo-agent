@@ -27,7 +27,7 @@ import datetime
 import time
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +50,7 @@ from tools.cmd_tools import (
     check_syntax, backup_project,
     list_symbols_in_file,
     run_self_test, get_agent_status,
+    delete_file, cleanup_test_files,
 )
 from tools.rebirth_tools import trigger_self_restart
 # 高性能压缩工具（暂时禁用 - Python 3.14 兼容性问题）
@@ -70,6 +71,11 @@ from tools.search_tools import grep_search, find_function_calls, find_definition
 from tools.code_tools import apply_diff_edit, validate_diff_format
 from tools.ast_tools import get_code_entity, list_file_entities
 from tools.memory_cleanup import compress_message_history, filter_exploration_messages, cleanup_after_success
+from tools.autonomous_task_generator import generate_autonomous_task
+from tools.state_broadcaster import (
+    StateBroadcaster, AgentStatus, get_broadcaster,
+    update_agent_status, log_agent_event, get_agent_state
+)
 
 
 # ============================================================================
@@ -1240,6 +1246,41 @@ def create_langchain_tools() -> list[BaseTool]:
         except json.JSONDecodeError as e:
             return f"[错误] JSON 解析失败: {e}"
 
+    @tool
+    def delete_file_tool(file_path: str, force: bool = False) -> str:
+        """
+        删除指定的文件或目录。
+
+        【好习惯】完成测试任务后，自动清理测试产生的临时文件。
+        保持工作目录整洁，避免垃圾文件堆积。
+
+        Args:
+            file_path: 要删除的文件或目录路径
+            force: 是否强制删除（跳过文件类型检查，仅用于确认安全的临时文件）
+
+        Returns:
+            操作结果描述
+        """
+        return delete_file(file_path, force=force)
+
+    @tool
+    def cleanup_test_files_tool(directory: str = ".", dry_run: bool = True) -> str:
+        """
+        清理指定目录下的测试相关临时文件。
+
+        【好习惯】定期清理测试产生的临时文件，避免垃圾堆积。
+        支持扫描并清理：test_*.py、__pycache__、*.pyc、*.log 等。
+
+        Args:
+            directory: 要扫描的目录，默认为当前目录
+            dry_run: 是否仅模拟运行（默认 True，显示找到的文件但不实际删除）
+                     设置为 False 时会实际删除文件
+
+        Returns:
+            操作结果描述，包含找到的可删除文件列表
+        """
+        return cleanup_test_files(directory=directory, dry_run=dry_run)
+
     return [
         web_search_tool,
         read_webpage_tool,
@@ -1274,6 +1315,11 @@ def create_langchain_tools() -> list[BaseTool]:
         get_code_entity_tool,
         list_file_entities_tool,
         search_and_read_tool,
+        # 自主任务生成器
+        generate_autonomous_task,
+        # 文件清理工具（好习惯）
+        delete_file_tool,
+        cleanup_test_files_tool,
     ]
 
 
@@ -1398,7 +1444,142 @@ class SelfEvolvingAgent:
             core_context=get_core_context(),
             current_goal=get_current_goal(),
         )
-    
+
+    def _run_evolution_gate(self) -> dict:
+        """
+        运行进化测试门控。
+
+        在 Agent 准备执行 trigger_self_restart 之前，必须通过所有测试。
+        这确保自我进化不会破坏核心功能。
+
+        Returns:
+            dict: {
+                "passed": bool,  # 是否全部通过
+                "passed_count": int,  # 通过数量
+                "failed_count": int,  # 失败数量
+                "total_count": int,  # 总数
+                "failed_modules": list,  # 失败的模块
+                "output": str,  # 完整输出
+            }
+        """
+        import subprocess
+        import sys
+
+        debug.info("运行进化测试门控...", tag="GATE")
+
+        try:
+            # 运行 pytest
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
+                capture_output=True,
+                text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                timeout=120,  # 2分钟超时
+            )
+
+            output = result.stdout + result.stderr
+
+            # 解析结果
+            passed_count = output.count(" PASSED")
+            failed_count = output.count(" FAILED")
+            total_count = passed_count + failed_count
+
+            # 提取失败的模块
+            failed_modules = []
+            for line in output.split("\n"):
+                if "FAILED" in line:
+                    # 提取测试名称
+                    parts = line.split("::")
+                    if len(parts) >= 2:
+                        failed_modules.append(parts[1].split("::")[0])
+
+            passed = failed_count == 0
+
+            if passed:
+                debug.success(f"测试门控通过: {passed_count}/{total_count}", tag="GATE")
+            else:
+                debug.warning(f"测试门控失败: {failed_count}/{total_count} 失败", tag="GATE")
+                for module in set(failed_modules):
+                    debug.warning(f"  - {module}", tag="GATE")
+
+            return {
+                "passed": passed,
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+                "total_count": total_count,
+                "failed_modules": list(set(failed_modules)),
+                "output": output,
+            }
+
+        except subprocess.TimeoutExpired:
+            debug.error("测试门控超时 (2分钟)", tag="GATE")
+            return {
+                "passed": False,
+                "passed_count": 0,
+                "failed_count": 1,
+                "total_count": 0,
+                "failed_modules": ["pytest_timeout"],
+                "output": "测试执行超时",
+            }
+        except Exception as e:
+            debug.error(f"测试门控执行失败: {e}", tag="GATE")
+            return {
+                "passed": False,
+                "passed_count": 0,
+                "failed_count": 1,
+                "total_count": 0,
+                "failed_modules": ["test_runner_error"],
+                "output": str(e),
+            }
+
+    def _acquire_external_knowledge(self) -> str:
+        """
+        感知阶段：自动获取外部知识。
+
+        在每次苏醒后，先搜索最新的 AI Agent 相关知识，
+        作为自我进化的参考标准。
+
+        Returns:
+            str: 搜索结果摘要
+        """
+        from tools.web_tools import web_search
+
+        debug.system("感知阶段：获取外部知识...", tag="KNOWLEDGE")
+
+        search_queries = [
+            "AI Agent architecture best practices 2024",
+            "SWE-agent OpenDevin code agent framework",
+            "LLM context compression memory management",
+        ]
+
+        knowledge_snippets = []
+
+        for query in search_queries:
+            try:
+                debug.debug(f"搜索: {query}", tag="KNOWLEDGE")
+                result = web_search(query)
+
+                # 提取关键信息
+                if result and len(result) > 100:
+                    # 取前500字符作为摘要
+                    snippet = result[:500]
+                    knowledge_snippets.append({
+                        "query": query,
+                        "snippet": snippet,
+                    })
+                    debug.info(f"获取到 {len(snippet)} 字符知识", tag="KNOWLEDGE")
+
+            except Exception as e:
+                debug.warning(f"知识获取失败: {query} - {e}", tag="KNOWLEDGE")
+
+        if knowledge_snippets:
+            summary = "## 外部知识参考\n\n"
+            for item in knowledge_snippets:
+                summary += f"### {item['query']}\n{item['snippet']}\n\n"
+            return summary
+
+        return ""
+
     def _compress_context(self, messages: list) -> list:
         """
         压缩对话上下文，释放 Token 消耗。
@@ -1473,10 +1654,11 @@ class SelfEvolvingAgent:
     def think_and_act(self, user_prompt: str = None) -> bool:
         """
         苏醒时执行一次思考和行动。
-        
+
         流程：
-        1. 构建系统提示词
-        2. 调用 LLM 进行推理
+        1. 感知阶段：获取外部知识（可选）
+        2. 构建系统提示词
+        3. 调用 LLM 进行推理
         4. 返回结果给 LLM 继续推理
         5. 直到 Agent 认为任务完成
 
@@ -1486,6 +1668,17 @@ class SelfEvolvingAgent:
         Returns:
             如果应该继续运行返回 True，如果触发了重启返回 False
         """
+
+        # ========== 感知阶段：自动获取外部知识 ==========
+        # 首次苏醒时获取最新知识作为进化参考
+        if self.global_consecutive_count == 0:
+            try:
+                external_knowledge = self._acquire_external_knowledge()
+                if external_knowledge:
+                    debug.system("已获取外部知识参考", tag="KNOWLEDGE")
+            except Exception as e:
+                debug.warning(f"知识摄取失败: {e}", tag="KNOWLEDGE")
+
         messages = [SystemMessage(content=self._build_system_prompt())]
 
         if user_prompt:
@@ -1642,7 +1835,32 @@ class SelfEvolvingAgent:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
         from tools.memory_tools import get_generation, get_core_context, get_current_goal, archive_generation_history, advance_generation
 
+        # 获取广播器
+        bc = get_broadcaster()
+
         action = None
+
+        # 工具状态映射：根据工具名称推断状态
+        tool_status_map = {
+            "web_search_tool": AgentStatus.SEARCHING,
+            "read_webpage_tool": AgentStatus.SEARCHING,
+            "edit_local_file_tool": AgentStatus.CODING,
+            "create_new_file_tool": AgentStatus.CODING,
+            "apply_diff_edit_tool": AgentStatus.CODING,
+            "check_syntax_tool": AgentStatus.CODING,
+            "run_cmd_tool": AgentStatus.CODING,
+            "run_self_test_tool": AgentStatus.TESTING,
+            "compress_context_tool": AgentStatus.COMPRESSING,
+            "backup_project_tool": AgentStatus.CODING,
+            "trigger_self_restart_tool": AgentStatus.RESTARTING,
+            "enter_hibernation_tool": AgentStatus.HIBERNATING,
+        }
+
+        # 推断当前状态
+        inferred_status = tool_status_map.get(tool_name, AgentStatus.THINKING)
+        action_preview = tool_args.get('reason', tool_args.get('command', tool_args.get('query', '')))[:50]
+        bc.update_status(inferred_status, action=f"{tool_name.replace('_tool', '')}: {action_preview}...")
+        bc.log_tool_call(tool_name, "开始")
 
         # ========== 特殊工具预处理 ==========
         # compress_context_tool: 内部压缩
@@ -1653,8 +1871,29 @@ class SelfEvolvingAgent:
             saved = old_tokens - new_tokens
             return (f"上下文压缩完成: 节省{saved} Token ({old_tokens} -> {new_tokens}) [保留最近3条原始消息]", None)
 
-        # trigger_self_restart_tool: 世代归档
+        # trigger_self_restart_tool: 世代归档 + 强制测试门控
         if tool_name == "trigger_self_restart_tool" and messages is not None:
+            # ========== 强制测试门控：进化前必须通过测试 ==========
+            if self._self_modified:
+                debug.system("检测到代码修改，正在运行测试门控...", tag="GATE")
+                
+                # 导入测试运行器
+                test_result = self._run_evolution_gate()
+                
+                if not test_result["passed"]:
+                    error_msg = (
+                        f"[TEST GATE FAILED] 测试未通过，禁止进化！\n"
+                        f"失败模块: {', '.join(test_result['failed_modules'])}\n"
+                        f"通过: {test_result['passed_count']}/{test_result['total_count']}\n"
+                        f"请修复失败的测试后再试。\n"
+                        f"提示: 运行 `python -m pytest tests/ -v` 查看详细错误"
+                    )
+                    debug.error("测试门控失败，禁止重启", tag="GATE")
+                    return (error_msg, None)
+                
+                debug.success(f"测试门控通过 ({test_result['passed_count']}/{test_result['total_count']})", tag="GATE")
+            # ========== 测试门控结束 ==========
+
             intermediate_steps = []
             for msg in messages:
                 if hasattr(msg, 'content') and isinstance(msg.content, str):
@@ -1703,6 +1942,7 @@ class SelfEvolvingAgent:
             "compress_context_tool": 30, "grep_search_tool": 30, "apply_diff_edit_tool": 15,
             "validate_diff_format_tool": 5, "find_function_calls_tool": 30, "find_definitions_tool": 30,
             "get_code_entity_tool": 15, "list_file_entities_tool": 10, "search_and_read_tool": 30,
+            "delete_file_tool": 10, "cleanup_test_files_tool": 30,
         }
         DEFAULT_TIMEOUT = 30
 
@@ -1737,6 +1977,8 @@ class SelfEvolvingAgent:
             "get_code_entity_tool": lambda: get_code_entity(**tool_args),
             "list_file_entities_tool": lambda: list_file_entities(**tool_args),
             "search_and_read_tool": lambda: search_and_read(**tool_args),
+            "delete_file_tool": lambda: delete_file(**tool_args),
+            "cleanup_test_files_tool": lambda: cleanup_test_files(**tool_args),
         }
 
         if tool_name not in tool_func_map:
@@ -1744,30 +1986,92 @@ class SelfEvolvingAgent:
 
         timeout = TOOL_TIMEOUTS.get(tool_name, DEFAULT_TIMEOUT)
 
-        def _run_tool():
-            return tool_func_map[tool_name]()
+        # ========== 智能重试配置 ==========
+        # 可重试的工具列表（I/O密集型操作）
+        RETRYABLE_TOOLS = {
+            "web_search_tool", "read_webpage_tool", "run_cmd_tool",
+            "run_powershell_tool", "run_batch_tool", "backup_project_tool",
+            "read_local_file_tool", "edit_local_file_tool", "create_new_file_tool",
+        }
+        # 最大重试次数
+        MAX_RETRIES = 2
+        # 重试间隔（秒），指数退避
+        RETRY_DELAYS = [1, 2]
+        # 网络相关错误关键词
+        NETWORK_ERROR_KEYWORDS = [
+            "ConnectionError", "Timeout", "timed out", "network",
+            "请求超时", "网络", "连接失败", "Connection refused",
+            "HTTP", "SSL", "certificate"
+        ]
 
-        try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_run_tool)
-                result = future.result(timeout=timeout)
+        def _is_retryable_error(error_msg: str) -> bool:
+            """判断错误是否可重试"""
+            if not error_msg:
+                return False
+            error_lower = error_msg.lower()
+            return any(kw.lower() in error_lower for kw in NETWORK_ERROR_KEYWORDS)
 
-            if tool_name in ("edit_local_file_tool", "create_new_file_tool"):
-                file_path = tool_args.get("file_path", "")
-                if "agent.py" in file_path:
-                    self._self_modified = True
-                    debug.success("agent.py 已修改，将触发重启", tag="MODIFY")
+        def _run_tool_with_retry() -> tuple:
+            """带重试机制的工具执行"""
+            last_error = None
+            
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(tool_func_map[tool_name])
+                        result = future.result(timeout=timeout)
+                    
+                    # 成功：检查结果是否包含可重试的错误
+                    if attempt > 0:
+                        debug.info(f"✓ {tool_name} 在第 {attempt + 1} 次尝试成功", tag="RETRY")
+                    return (result, None, None)
+                    
+                except FuturesTimeoutError:
+                    last_error = f"执行超时 ({timeout}秒)"
+                    debug.warning(f"{tool_name} 第 {attempt + 1} 次尝试超时", tag="RETRY")
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    last_error = error_msg
+                    
+                    # 判断是否应该重试
+                    if tool_name not in RETRYABLE_TOOLS or not _is_retryable_error(error_msg):
+                        # 不可重试的错误，直接返回
+                        debug.error(f"{tool_name} 执行异常（非可重试错误）: {type(e).__name__}: {e}", tag="ERROR")
+                        return (f"[错误] {error_msg}", None, type(e).__name__)
+                    
+                    debug.warning(f"{tool_name} 第 {attempt + 1} 次尝试失败: {type(e).__name__}: {e}", tag="RETRY")
+                
+                # 如果不是最后一次尝试，等待后重试
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt] if attempt < len(RETRY_DELAYS) else RETRY_DELAYS[-1]
+                    debug.info(f"等待 {delay} 秒后重试...", tag="RETRY")
+                    time.sleep(delay)
+            
+            # 所有重试都失败了
+            final_msg = f"[最终失败] {tool_name} 经过 {MAX_RETRIES + 1} 次尝试后失败\n最后错误: {last_error}\n建议: 检查网络连接或稍后重试"
+            debug.error(f"✗ {tool_name} 重试耗尽", tag="FAIL")
+            return (final_msg, None, "MaxRetriesExceeded")
 
-            return (result, None)
+        # 执行带重试的工具
+        result, action, error_type = _run_tool_with_retry()
 
-        except FuturesTimeoutError:
-            timeout_msg = f"[超时] 工具执行超时 ({timeout}秒)\n工具: {tool_name}\n参数: {str(tool_args)[:200]}\n建议: 尝试简化操作"
-            debug.warning(f"{tool_name} 执行超时 ({timeout}秒)", tag="TIMEOUT")
-            return (timeout_msg, None)
+        # 工具执行完成，记录结果
+        if error_type:
+            bc.log_tool_call(tool_name, f"失败: {error_type}")
+            bc.log_error(f"工具 {tool_name} 执行失败: {error_type}")
+        else:
+            bc.log_tool_call(tool_name, "成功")
 
-        except Exception as e:
-            debug.error(f"工具执行异常: {type(e).__name__}: {e}", exc_info=True)
-            return (f"[错误] {str(e)}", None)
+        # 标记自修改
+        if error_type is None and tool_name in ("edit_local_file_tool", "create_new_file_tool"):
+            file_path = tool_args.get("file_path", "")
+            if "agent.py" in file_path:
+                self._self_modified = True
+                debug.success("agent.py 已修改，将触发重启", tag="MODIFY")
+                bc.log("agent.py 已修改，准备重启应用更改", "MODIFY")
+
+        return (result, action)
     
     def run_loop(self, initial_prompt: str = None) -> None:
         """
@@ -1778,7 +2082,19 @@ class SelfEvolvingAgent:
         Args:
             initial_prompt: 首次苏醒时的用户输入（可选）
         """
+        # 获取广播器
+        bc = get_broadcaster()
+
         debug.system(f"主循环开始 (awake_interval={self.config.agent.awake_interval}s)", tag=self.name)
+
+        # 广播状态：苏醒中
+        from tools.memory_tools import get_generation, get_current_goal
+        bc.update_status(
+            AgentStatus.AWAKENING,
+            action="系统初始化中...",
+            generation=get_generation(),
+            current_goal=get_current_goal(),
+        )
 
         # 记录会话开始
         conversation_logger.start_session({
@@ -1795,7 +2111,52 @@ class SelfEvolvingAgent:
             debug.kv("记忆状态", f"G{get_generation()} | {get_current_goal()[:50]}")
 
             print_evolution_time()
+            bc.log("系统启动完成，开始自主进化", "START")
+
+            # 首次迭代：使用 initial_prompt，如果没有则自动生成任务
+            user_input = initial_prompt
+            if user_input:
+                debug.system("首次任务已加载，开始执行...", tag="START")
+                bc.update_status(AgentStatus.THINKING, action="处理用户任务...")
+            else:
+                debug.system(f"自主进化模式，awake_interval={self.config.agent.awake_interval}s", tag="AUTO")
+                bc.update_status(AgentStatus.PLANNING, action="生成自主任务...")
+
+                # 无外部输入时，先自动生成任务
+                from tools.autonomous_task_generator import get_autonomous_task_sync
+                auto_task = get_autonomous_task_sync()
+                try:
+                    import json
+                    task_data = json.loads(auto_task)
+                    if task_data.get("status") == "success":
+                        task = task_data.get("task", {})
+                        user_input = f"""【自主任务 G{task_data.get('generation', '?')}】
+类型：{task.get('type', 'unknown')}
+目标：{task.get('title', '未知目标')}
+描述：{task.get('description', '无描述')}
+建议行动：{task.get('suggested_action', '请自行分析并行动')}
+"""
+                        debug.system(f"已生成自主任务: {task.get('title', '未知')}", tag="TASK")
+                        bc.update_status(
+                            AgentStatus.PLANNING,
+                            action=f"生成任务: {task.get('title', '未知')[:30]}...",
+                            current_goal=task.get('title', ''),
+                        )
+                except:
+                    user_input = "作为自我进化 Agent，请分析当前代码库状态，主动寻找可以改进的地方并执行。"
+
+            iteration_count = 0
+            total_tools_executed = 0
+
             while True:
+                iteration_count += 1
+                bc.update_status(
+                    AgentStatus.THINKING,
+                    action="思考并执行任务...",
+                    iteration_count=iteration_count,
+                    tools_executed=total_tools_executed,
+                )
+
                 # 自动备份
                 if self.config.agent.auto_backup:
                     current_time = time.time()
@@ -1804,32 +2165,67 @@ class SelfEvolvingAgent:
                         last_backup_time = current_time
 
                 # 执行思考
-                should_continue = self.think_and_act(user_prompt=initial_prompt if is_first_iteration else None)
+                should_continue = self.think_and_act(user_prompt=user_input)
 
-                if is_first_iteration:
-                    initial_prompt = None
-                    is_first_iteration = False
+                # 消耗掉输入，下次自动生成新任务
+                user_input = None
 
                 if not should_continue:
                     debug.warning("重启已触发", tag="AGENT")
+                    bc.log_restart("主循环结束")
                     break
 
-                # 如果 Agent 已主动休眠，跳过被动休眠
+                # 如果 Agent 已主动休眠（调用了 enter_hibernation_tool）
                 if should_continue == "hibernated":
-                    debug.debug("Agent 已主动休眠，苏醒继续", tag="WAKE")
+                    debug.debug("Agent 已主动休眠完毕，继续执行", tag="WAKE")
                     continue
+
+                # 正常执行完成，自动生成下一个自主任务
+                debug.system("执行完成，生成下一个自主任务...", tag="EVOLVE")
+                bc.update_status(AgentStatus.PLANNING, action="生成下一个自主任务...")
+
+                from tools.autonomous_task_generator import get_autonomous_task_sync
+                auto_task = get_autonomous_task_sync()
+                try:
+                    import json
+                    task_data = json.loads(auto_task)
+                    if task_data.get("status") == "success":
+                        task = task_data.get("task", {})
+                        user_input = f"""【自主任务 G{task_data.get('generation', '?')}】
+类型：{task.get('type', 'unknown')}
+目标：{task.get('title', '未知目标')}
+描述：{task.get('description', '无描述')}
+建议行动：{task.get('suggested_action', '请自行分析并行动')}
+"""
+                        debug.system(f"新任务: {task.get('title', '未知')} (优先级: {task.get('priority', '?')})", tag="TASK")
+                        bc.update_status(
+                            AgentStatus.PLANNING,
+                            action=f"新任务: {task.get('title', '未知')[:30]}",
+                            current_goal=task.get('title', ''),
+                        )
+                except:
+                    user_input = "作为自我进化 Agent，请继续分析代码库，寻找下一个改进机会。"
+                    debug.warning("任务解析失败，使用通用任务", tag="ERROR")
+
+                # 短暂休眠避免过快循环
+                time.sleep(2)
 
 
         except KeyboardInterrupt:
             debug.info("收到中断，退出", tag="AGENT")
+            bc.log("收到中断信号，退出主循环", "SHUTDOWN")
             conversation_logger.end_session({"reason": "keyboard_interrupt"})
         except Exception as e:
             debug.error(f"主循环异常: {type(e).__name__}: {e}", exc_info=True)
+            bc.log_error(f"主循环异常: {type(e).__name__}: {e}")
             conversation_logger.log_error("main_loop_exception", str(e), traceback.format_exc())
         finally:
             uptime = datetime.now() - self.start_time
             debug.info(f"运行结束 (运行时长: {uptime})", tag=self.name)
+            bc.log(f"主循环结束 | 运行时长: {uptime}", "SHUTDOWN")
+            bc.update_status(AgentStatus.IDLE, action="系统已关闭")
             conversation_logger.end_session({"uptime_seconds": uptime.total_seconds()})
+            bc.close()
 
 
 # ============================================================================
