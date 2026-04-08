@@ -19,8 +19,8 @@ api_base = "http://localhost:8000/v1"
 temperature = 0.2
 # 最大输出 tokens
 max_tokens = 4096
-# API 超时时间（秒）
-api_timeout = 60
+# API 超时时间（秒）- 本地模型建议设置为 600 秒
+api_timeout = 600
 
 # ============================================================
 # Agent 行为配置
@@ -50,8 +50,10 @@ auto_restart_threshold = 0
 [context_compression]
 # 启用运行时上下文压缩
 enabled = true
-# Token 阈值，超过此值触发压缩（建议设为模型 context window 的 50-70%）
-max_token_limit = 20000
+# Token 阈值，超过此值触发压缩
+# 模型 context window 为 32768，预留 4096 输出，实际可用约 28000
+# 设置为 16000 以确保有足够安全边界
+max_token_limit = 16000
 # 保留最近的工具调用次数（让模型知道自己最近在干嘛）
 keep_recent_steps = 2
 # 压缩摘要的最大字数

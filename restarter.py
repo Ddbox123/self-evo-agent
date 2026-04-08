@@ -304,6 +304,11 @@ def spawn_new_process(script_path: str, env: Optional[dict] = None,
         if env:
             process_env.update(env)
         
+        # 日志文件路径
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'agent_realtime.log')
+        
         if IS_WINDOWS:
             # Windows: 使用 pythonw.exe 后台运行，或使用 CREATE_NEW_PROCESS_GROUP
             # 这样可以让子进程独立于父进程
@@ -313,8 +318,8 @@ def spawn_new_process(script_path: str, env: Optional[dict] = None,
                 [sys.executable, script_abs],
                 env=process_env,
                 creationflags=creation_flags,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdout=open(log_file, 'a', encoding='utf-8'),
+                stderr=subprocess.STDOUT
             )
         else:
             # Unix: 使用 os.setsid 创建新的会话组
@@ -328,8 +333,12 @@ def spawn_new_process(script_path: str, env: Optional[dict] = None,
                     # 第二次 fork: 确保进程不会成为会话首进程
                     pid = os.fork()
                     if pid == 0:
-                        # 孙子进程：执行目标脚本
+                        # 孙子进程：执行目标脚本，输出到日志文件
                         os.setsid()  # 创建新的会话
+                        os.chdir(log_dir)
+                        with open(log_file, 'a') as f:
+                            os.dup2(f.fileno(), 1)  # stdout -> log file
+                            os.dup2(f.fileno(), 2)  # stderr -> log file
                         os.execvp(sys.executable, [sys.executable, script_abs])
                     else:
                         # 子进程：立即退出
@@ -347,8 +356,8 @@ def spawn_new_process(script_path: str, env: Optional[dict] = None,
             process = subprocess.Popen(
                 [sys.executable, script_abs],
                 env=process_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=open(log_file, 'a', encoding='utf-8'),
+                stderr=subprocess.STDOUT,
                 start_new_session=True if not IS_WINDOWS else False
             )
             new_pid = process.pid

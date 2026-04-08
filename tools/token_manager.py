@@ -41,11 +41,12 @@ MAX_SYSTEM_PROMPT_TOKENS = 2000   # 系统提示词最大 Token
 MAX_TOOL_RESULT_TOKENS = 400      # 单个工具结果最大 Token（优化）
 MAX_HISTORY_PAIRS = 3             # 保留的最大交互对数（优化）
 
-# 压缩阈值（优化）
-COMPRESSION_TRIGGER_RATIO = 0.75  # 触发压缩的 Token 比例（保守触发，避免频繁压缩）
-COMPRESSION_WARNING_RATIO = 0.65  # 警告阈值（预压缩）
-COMPRESSION_CRITICAL_RATIO = 0.85 # 紧急压缩阈值
-COMPRESSION_TARGET_RATIO = 0.55   # 压缩后应达到的比例
+# 压缩阈值（优化 - 更激进的阈值以避免超限）
+# 基于模型 32768 context window，配置 max_token_limit = 16000
+COMPRESSION_TRIGGER_RATIO = 0.60  # 60% 时触发压缩
+COMPRESSION_WARNING_RATIO = 0.50   # 50% 时预压缩警告
+COMPRESSION_CRITICAL_RATIO = 0.75  # 75% 时紧急压缩
+COMPRESSION_TARGET_RATIO = 0.45    # 压缩后应达到 45%
 
 # 摘要配置
 MINIMAL_SUMMARY_CHARS = 80        # 极简摘要最大字符数
@@ -196,6 +197,8 @@ class TokenCompressionStats:
 def estimate_tokens_precise(text: str) -> int:
     """
     精确的 Token 估算（考虑中英文差异）。
+    
+    改进：增加安全系数 1.2，避免低估导致超限。
     """
     if not text:
         return 0
@@ -211,8 +214,11 @@ def estimate_tokens_precise(text: str) -> int:
     # 其他
     other = len(text) - chinese - cjk_ext - ascii_text - whitespace
     
-    # 估算
-    return int(chinese / 1.5 + cjk_ext / 1.5 + ascii_text / 4 + whitespace / 6 + other / 2)
+    # 估算（中文约1.5字符=1 token，英文约4字符=1 token）
+    # 增加 1.2x 安全系数，避免低估
+    base_tokens = chinese / 1.5 + cjk_ext / 1.5 + ascii_text / 4 + whitespace / 6 + other / 2
+    
+    return int(base_tokens * 1.2) + 50  # 额外加50作为消息结构开销
 
 
 def estimate_messages_tokens(messages: list) -> int:

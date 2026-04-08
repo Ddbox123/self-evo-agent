@@ -33,8 +33,8 @@ from tools.memory_tools import (
     read_generation_archive,
     _load_memory,
     _save_memory,
-    MEMORY_FILE,
-    _get_workspace_path,
+    _get_memory_index_path,
+    _get_archives_path,
 )
 
 

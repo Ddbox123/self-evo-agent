@@ -131,6 +131,11 @@ def spawn_detached_process_windows(command: list, env: Optional[dict] = None) ->
     try:
         import subprocess
         
+        # 日志文件路径
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        restarter_log = os.path.join(log_dir, 'restarter_realtime.log')
+        
         # Windows: 使用 CREATE_NO_WINDOW 避免弹出控制台窗口
         # 使用 CREATE_NEW_PROCESS_GROUP 使进程独立
         creation_flags = 0x08000000  # CREATE_NO_WINDOW
@@ -140,8 +145,8 @@ def spawn_detached_process_windows(command: list, env: Optional[dict] = None) ->
             command,
             env=env,
             creationflags=creation_flags,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=open(restarter_log, 'a', encoding='utf-8'),
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=False
         )
@@ -171,6 +176,11 @@ def spawn_detached_process_unix(command: list, env: Optional[dict] = None) -> Op
         新进程的 PID，失败返回 None
     """
     try:
+        # 日志文件路径
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        restarter_log = os.path.join(log_dir, 'restarter_realtime.log')
+        
         # 第一次 fork
         pid = os.fork()
         
@@ -184,6 +194,12 @@ def spawn_detached_process_unix(command: list, env: Optional[dict] = None) -> Op
                     # 孙子进程（最终运行的进程）
                     # 创建新会话，完全脱离
                     os.setsid()
+                    
+                    # 重定向输出到日志文件
+                    os.chdir(log_dir)
+                    with open(restarter_log, 'a') as f:
+                        os.dup2(f.fileno(), 1)  # stdout -> log
+                        os.dup2(f.fileno(), 2)  # stderr -> log
                     
                     # 执行目标命令
                     os.execvp(command[0], command)
@@ -313,7 +329,34 @@ def trigger_self_restart(reason: str = "") -> str:
     logger.info("=" * 60)
     logger.info("触发自我重启")
     logger.info("=" * 60)
-    
+
+    # 0. 【强制记忆快照】在重启前自动保存状态
+    # 这是最后一道防线，确保即使 Agent 没有主动保存记忆，系统也会自动保存
+    try:
+        from tools.memory_tools import force_save_current_state, get_generation, get_core_context, get_current_goal
+        current_gen = get_generation()
+        core_ctx = get_core_context() or "无"
+        current_goal = get_current_goal() or "待定"
+
+        # 从环境变量或 reason 中提取模型可能提供的智慧摘要
+        # reason 格式可能是 "xxx|智慧摘要" 或纯 reason
+        if "|" in reason:
+            parts = reason.split("|", 1)
+            restart_reason = parts[0].strip()
+            model_wisdom = parts[1].strip() if len(parts) > 1 else core_ctx
+        else:
+            restart_reason = reason
+            model_wisdom = core_ctx
+
+        snapshot_result = force_save_current_state(
+            core_wisdom=model_wisdom,
+            next_goal=current_goal,
+            generation=current_gen
+        )
+        logger.info(f"[强制快照] {snapshot_result}")
+    except Exception as e:
+        logger.error(f"[ERROR] 强制记忆快照失败: {e}")
+
     # 1. 获取必要信息
     current_pid = get_current_pid()
     script_path = get_script_path()

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Agent 状态广播模块 - 实时状态监控系统
+Agent 状态广播模块 - 实时状态管理
 
-为 Observer Dashboard 提供实时状态更新。
+为终端 UI 提供实时状态更新，写入 JSON 文件供 TUI 渲染使用。
 
 状态类型：
 - IDLE: 空闲/等待
@@ -47,8 +47,7 @@ class StateBroadcaster:
     """
     Agent 状态广播器
 
-    将 Agent 当前状态写入 JSON 文件，供 Dashboard 实时读取。
-    同时将日志实时写入日志文件，供 WebSocket tail。
+    将 Agent 当前状态写入 JSON 文件，供 TUI 实时读取渲染。
     """
 
     _instance = None

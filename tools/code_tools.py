@@ -41,24 +41,26 @@ def _normalize_whitespace(text: str) -> str:
 def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = False) -> Optional[Tuple[int, int]]:
     """
     在内容中查找匹配块的位置
-
-    Args:
-        content: 文件内容
-        search_block: 要查找的块
-        allow_fuzzy: 是否允许模糊匹配
-
-    Returns:
-        (起始位置, 结束位置) 或 None
+    
+    【增强】支持行级模糊匹配：
+    - 忽略行首缩进差异
+    - 忽略行尾空白
+    - 允许关键行顺序匹配（用于处理微小的空白差异）
     """
-    search_normalized = _normalize_whitespace(search_block)
-
-    # 精确匹配（规范化后）
     lines = content.split('\n')
-    search_lines = search_normalized.split('\n')
-
-    for i in range(len(lines) - len(search_lines) + 1):
+    search_lines_raw = search_block.split('\n')
+    
+    # 提取非空行（关键行）
+    search_key_lines = [l.rstrip() for l in search_lines_raw if l.strip()]
+    if not search_key_lines:
+        return None
+    
+    search_len = len(search_key_lines)
+    
+    # 精确匹配（规范化后）
+    for i in range(len(lines) - search_len + 1):
         match = True
-        for j, search_line in enumerate(search_lines):
+        for j, search_line in enumerate(search_key_lines):
             content_line = lines[i + j].rstrip()
             if content_line != search_line:
                 match = False
@@ -66,26 +68,37 @@ def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = Fa
         if match:
             # 计算字符位置
             start_line = i
-            end_line = i + len(search_lines)
+            end_line = i + search_len
             start_pos = sum(len(lines[k]) + 1 for k in range(start_line))
             end_pos = sum(len(lines[k]) + 1 for k in range(end_line))
             return (start_pos, end_pos)
-
-    # 模糊匹配（允许 minor_diff）
+    
+    # 【增强】模糊匹配：只要求关键行存在且顺序正确，允许空白差异
     if allow_fuzzy:
-        for i in range(len(lines) - len(search_lines) + 1):
-            match_ratio = difflib.SequenceMatcher(
-                None,
-                '\n'.join(l.rstrip() for l in lines[i:i + len(search_lines)]),
-                search_normalized
-            ).ratio()
-            if match_ratio > 0.85:
+        for i in range(len(lines) - search_len * 2 + 1):  # 给更多空间找
+            matches = 0
+            content_idx = i
+            
+            for search_line in search_key_lines:
+                # 在剩余行中找匹配（允许跳过空行）
+                found = False
+                for cj in range(content_idx, min(i + search_len * 2, len(lines))):
+                    if lines[cj].rstrip() == search_line:
+                        matches += 1
+                        content_idx = cj + 1
+                        found = True
+                        break
+                if not found:
+                    break
+            
+            # 如果所有关键行都匹配
+            if matches >= search_len * 0.8:  # 80% 匹配即可
                 start_line = i
-                end_line = i + len(search_lines)
+                end_line = content_idx
                 start_pos = sum(len(lines[k]) + 1 for k in range(start_line))
                 end_pos = sum(len(lines[k]) + 1 for k in range(end_line))
                 return (start_pos, end_pos)
-
+    
     return None
 
 
@@ -216,27 +229,55 @@ def apply_diff_edit(file_path: str, diff_text: str, allow_fuzzy: bool = False) -
     return '\n'.join(result)
 
 
-def _find_similar_snippet(content: str, search_block: str, context_lines: int = 3) -> str:
-    """找到并返回最相似的代码片段用于提示用户"""
-    search_lines = [l.strip() for l in search_block.split('\n') if l.strip()]
-    if not search_lines:
+def _find_similar_snippet(content: str, search_block: str, context_lines: int = 5) -> str:
+    """
+    找到并返回最相似的代码片段用于提示用户
+    
+    改进：更智能地处理行首空格和末尾空白
+    """
+    if not search_block:
         return ""
-
+    
     content_lines = content.split('\n')
+    search_lines_raw = search_block.split('\n')
+    
+    # 提取关键行（排除空行）
+    search_key_lines = [l.rstrip() for l in search_lines_raw if l.strip()]
+    if not search_key_lines:
+        return ""
+    
     best_match = None
     best_ratio = 0
-
+    
+    # 只在关键行数范围内搜索
     for i in range(len(content_lines)):
-        snippet = '\n'.join(content_lines[i:i + len(search_lines)])
-        ratio = difflib.SequenceMatcher(None, snippet, search_block).ratio()
+        # 构建相同行数的snippet
+        snippet_lines = content_lines[i:i + len(search_key_lines)]
+        if len(snippet_lines) < len(search_key_lines):
+            break
+            
+        # 计算相似度（逐行比较）
+        matches = 0
+        for sl, cl in zip(search_key_lines, snippet_lines):
+            if sl == cl.rstrip():
+                matches += 1
+        
+        ratio = matches / len(search_key_lines)
         if ratio > best_ratio and ratio > 0.3:
             best_ratio = ratio
-            best_match = content_lines[i:i + len(search_lines) + context_lines]
-
+            # 获取上下文（包括相邻行）
+            start = max(0, i - 1)
+            end = min(len(content_lines), i + len(search_key_lines) + context_lines)
+            best_match = content_lines[start:end]
+    
     if best_match:
-        lines_preview = '\n'.join(f"  第{i+1}行: {l[:80]}" for i, l in enumerate(best_match[:5]))
-        return f"[提示] 文件中相似的代码:\n{lines_preview}"
-
+        preview_lines = []
+        for idx, line in enumerate(best_match):
+            line_num = i - len(best_match) + idx + 1 if best_match else idx + 1
+            display_line = line if len(line) <= 80 else line[:77] + "..."
+            preview_lines.append(f"  {line_num:>4}: {display_line}")
+        return f"[提示] 文件中相似的代码:\n" + "\n".join(preview_lines)
+    
     return ""
 
 

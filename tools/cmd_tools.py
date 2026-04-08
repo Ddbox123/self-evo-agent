@@ -55,72 +55,29 @@ def _is_command_safe(command: str) -> tuple:
 
 
 # ============================================================================
-# CMD 执行
+# CMD 执行（委托给 CLI 引擎）
 # ============================================================================
+
+# 导入 CLI 引擎
+
 
 def run_cmd(command: str, timeout: int = DEFAULT_TIMEOUT, shell: bool = True,
             cwd: Optional[str] = None, check_safety: bool = True) -> str:
-    """执行 CMD 命令"""
+    """执行 CMD 命令（委托给 CLI 引擎）"""
     if not command or not isinstance(command, str):
         return "[CMD] 错误: 命令不能为空"
-    
+
     command = command.strip()
     if not command:
         return "[CMD] 错误: 命令不能为空"
-    
+
     if check_safety:
         is_safe, reason = _is_command_safe(command)
         if not is_safe:
-            return f"[CMD] 返回码: -2\n[安全检查] {reason}\n命令已拒绝执行"
-    
-    if timeout <= 0:
-        timeout = None
-    
-    try:
-        env = os.environ.copy()
-        exec_kwargs = {
-            'shell': shell,
-            'capture_output': True,
-            'text': True,
-            'encoding': 'utf-8',
-            'errors': 'replace',
-            'timeout': timeout,
-        }
-        
-        if cwd:
-            cwd_path = os.path.abspath(cwd)
-            if os.path.isdir(cwd_path):
-                exec_kwargs['cwd'] = cwd_path
-        
-        result = subprocess.run(command, **exec_kwargs)
-        
-        output_lines = [f"[CMD] 返回码: {result.returncode}"]
-        
-        if result.stdout:
-            output = result.stdout[:MAX_OUTPUT_LENGTH]
-            if len(result.stdout) > MAX_OUTPUT_LENGTH:
-                output += f"\n... (输出已截断, 原始长度: {len(result.stdout)} 字符)"
-            output_lines.append(f"\n[标准输出]\n{output}")
-        
-        if result.stderr:
-            error_output = result.stderr[:MAX_OUTPUT_LENGTH]
-            if len(result.stderr) > MAX_OUTPUT_LENGTH:
-                error_output += f"\n... (错误输出已截断)"
-            output_lines.append(f"\n[标准错误]\n{error_output}")
-        
-        if not result.stdout and not result.stderr:
-            output_lines.append("\n(命令无输出)")
-        
-        return "\n".join(output_lines)
-        
-    except subprocess.TimeoutExpired:
-        return f"[CMD] 返回码: -1\n[错误] 命令执行超时 ({timeout}秒)"
-    except FileNotFoundError as e:
-        return f"[CMD] 返回码: -3\n[错误] 命令不存在或无法找到: {command}"
-    except PermissionError:
-        return f"[CMD] 返回码: -4\n[错误] 权限不足，无法执行命令"
-    except Exception as e:
-        return f"[CMD] 返回码: -99\n[错误] {str(e)}"
+            return f"[CMD] 安全检查] {reason}\n命令已拒绝执行"
+
+    # 委托给 CLI 引擎
+    return _cli_execute(command, timeout=timeout, cwd=cwd)
 
 
 def run_powershell(command: str, timeout: int = DEFAULT_TIMEOUT, cwd: Optional[str] = None) -> str:

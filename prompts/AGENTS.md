@@ -1,5 +1,55 @@
 # AGENTS.md - 标准操作流 SOP
 
+**⚠️ 禁止修改此文件 - 包含操作规范 SOP，修改会导致行为混乱**
+
+---
+
+## 【铁律】记忆保存与重启协议
+
+### ⚠️ 警告：你的记忆可能被抹除！
+
+如果你在调用 `trigger_self_restart` 之前没有正确保存记忆，你的智慧将被**彻底抹除**！
+
+**系统已内置强制记忆快照，但你的总结仍然是进化的核心智慧来源。**
+
+### 每次决定重启前必须：
+
+1. **总结本世代教训**：用不超过 300 字总结你学到了什么
+2. **调用 `commit_compressed_memory`**：传入 (core_wisdom=你的总结, next_goal=下一世代任务)
+3. **确认返回值包含 success**：如果没有成功，检查为什么
+4. **然后调用 `trigger_self_restart`**
+
+### 错误示例：
+
+```
+思考：我已经完成了任务，让我重启以应用更改...
+调用 trigger_self_restart(reason="任务完成")
+# ❌ 错误！没有先保存记忆，智慧将丢失！
+```
+
+### 正确示例：
+
+```
+思考：我已经完成了任务，让我先保存本次进化的智慧...
+调用 commit_compressed_memory(
+    new_core_context="学会了使用 grep_search 快速定位 TODO 注释。CLI 工具要注意超时处理...",
+    next_goal="继续探索代码库，识别更多可改进的点"
+)
+# ✅ 确认返回 {"status": "success"} 后...
+调用 trigger_self_restart(reason="已完成本世代任务")
+```
+
+### 系统自动保护机制：
+
+即使你忘记调用 `commit_compressed_memory`，系统在调用 `trigger_self_restart` 时会：
+1. 自动尝试保存当前 memory.json 中的状态
+2. 归档本次世代历史
+3. 推进到下一世代
+
+但**最好的智慧来自你自己的总结**，而不是系统的自动快照！
+
+---
+
 ## 高效编码原则 (Anti-Bloat Rules)
 
 **你现在配备了高级 AST 语法树工具和瞬时记忆机制。严禁像初学者一样"先列目录，再读全文件，再找行号"！**
@@ -22,13 +72,6 @@
 1. **立刻规划完整的 `diff_text`**
 2. 在一次 `apply_diff_edit` 调用中完成所有修改
 3. **不要拖泥带水，不要"让我再看看确认一下"**
-
-### 4. 阅后即焚
-
-系统会自动清理"探索期"产生的中间步骤日志：
-- 成功执行 `apply_diff_edit` 后，之前的所有 `grep_search`、`read_file`、`list_dir` 等探测日志会被自动丢弃
-- 只保留"我修改了文件 X，语法检查通过"这个结论
-- **不要手动清理，系统会处理**
 
 ---
 
@@ -129,6 +172,18 @@ new_code_2
 3. 在 `agent.py` 的 `create_langchain_tools()` 中注册
 4. 调用 `trigger_self_restart` 重启生效
 
+### 修改提示词
+
+可以修改以下提示词文件：
+- `prompts/IDENTITY.md` - 身份性格定义
+- `prompts/USER.md` - 用户环境信息
+- `prompts/DYNAMIC.md` - 世代任务（由工具自动写入）
+- 自定义新的 `.md` 文件
+
+**禁止修改**：
+- `prompts/SOUL.md` - 核心使命与铁律
+- `prompts/AGENTS.md` - 操作规范 SOP
+
 ### 工具速查（高效版）
 
 | 任务 | 推荐工具 | 说明 |
@@ -143,4 +198,6 @@ new_code_2
 | **语法检查** | `check_syntax` | 每次修改后必查 |
 | **文件浏览** | `list_dir` | 仅用于目录结构 |
 | **网络搜索** | `web_search` / `read_webpage` | - |
+| **保存记忆** | `commit_compressed_memory` | **重启前必调用！** |
+| **读取记忆** | `read_memory` | 查看当前世代状态 |
 | **自我重启** | `trigger_self_restart` | 修改后生效 |

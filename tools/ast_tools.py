@@ -96,6 +96,8 @@ class ASTEntityExtractor(ast.NodeVisitor):
         return 'unknown'
 
 
+import logging
+
 def parse_file_ast(file_path: str) -> Optional[ast.Module]:
     """解析 Python 文件为 AST"""
     path = Path(file_path)
@@ -105,9 +107,9 @@ def parse_file_ast(file_path: str) -> Optional[ast.Module]:
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
         return ast.parse(source, filename=str(path))
-    except (SyntaxError, UnicodeDecodeError):
+    except (SyntaxError, UnicodeDecodeError) as e:
+        logging.error(f"Failed to parse {file_path}: {e}")
         return None
-
 
 def get_file_entities(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
     """

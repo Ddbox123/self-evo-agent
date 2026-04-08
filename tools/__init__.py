@@ -62,8 +62,6 @@ from tools.token_manager import (
     format_compression_report,
 )
 
-# 高级压缩工具
-from tools.advanced_compress_tool import advanced_compress_context_tool
 
 # 全局搜索工具 (Cursor/Aider 范式)
 from tools.search_tools import (
@@ -88,11 +86,19 @@ from tools.ast_tools import (
     get_file_entities,
 )
 
-# 瞬时记忆管理器 (阅后即焚)
-from tools.memory_cleanup import (
-    EphemeralMemoryManager,
-    get_memory_manager,
-    compress_message_history,
-    filter_exploration_messages,
-    cleanup_after_success,
+# 任务清单工具 (强目标驱动与打勾收网)
+from tools.task_tools import (
+    set_plan_tool,
+    tick_subtask_tool,
+    modify_task_tool,
+    add_task_tool,
+    remove_task_tool,
+    get_task_status,
+    check_restart_block,
 )
+
+# LangChain 工具包装
+from tools.langchain_tools import create_langchain_tools
+
+# 高级压缩工具
+from tools.advanced_compress_tool import advanced_compress_context_tool

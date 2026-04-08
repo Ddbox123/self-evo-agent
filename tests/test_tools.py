@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # 导入被测工具
 PROJECT_ROOT = Path(__file__).parent.parent

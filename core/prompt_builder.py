@@ -1,7 +1,8 @@
+# -*- coding: utf-8 -*-
 """
 core/prompt_builder.py - 动态系统提示词组装器
 
-从 prompts/ 目录读取 Markdown 文件，动态组装系统提示词。
+从 workspace/prompts/ 目录读取 Markdown 文件，动态组装系统提示词。
 支持模板变量替换和 docs/tools_manual.md 索引注入。
 """
 
@@ -10,13 +11,10 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 
 
-# Prompt 文件路径
-PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
-SOUL_FILE = os.path.join(PROMPTS_DIR, "SOUL.md")
-IDENTITY_FILE = os.path.join(PROMPTS_DIR, "IDENTITY.md")
-AGENTS_FILE = os.path.join(PROMPTS_DIR, "AGENTS.md")
-USER_FILE = os.path.join(PROMPTS_DIR, "USER.md")
-TOOLS_MANUAL = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "tools_manual.md")
+def _get_workspace_prompts_dir() -> str:
+    """获取工作区提示词目录"""
+    from core.workspace_manager import get_workspace
+    return str(get_workspace().prompts_dir)
 
 
 def _load_prompt_file(file_path: str) -> str:
@@ -33,10 +31,13 @@ def _load_prompt_file(file_path: str) -> str:
 def _extract_tools_manual_index() -> str:
     """从 tools_manual.md 提取精简索引"""
     try:
-        if not os.path.exists(TOOLS_MANUAL):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        tools_manual = os.path.join(project_root, "docs", "tools_manual.md")
+
+        if not os.path.exists(tools_manual):
             return ""
 
-        with open(TOOLS_MANUAL, "r", encoding="utf-8") as f:
+        with open(tools_manual, "r", encoding="utf-8") as f:
             content = f.read()
 
         # 提取工具列表部分（简化版）
@@ -82,6 +83,31 @@ def _load_memory_context() -> Dict[str, Any]:
         }
 
 
+def _load_task_checklist() -> str:
+    """加载任务清单（强目标驱动）"""
+    try:
+        from core.task_manager import get_task_manager
+        tm = get_task_manager()
+        return tm.render_prompt_checklist()
+    except Exception:
+        return ""
+
+
+def _load_codebase_map() -> str:
+    """
+    加载代码库认知地图
+
+    从数据库查询所有已刻印的代码库认知，
+    用于注入到 System Prompt 中供 Agent 参考。
+    """
+    try:
+        from core.workspace_manager import get_workspace
+        ws = get_workspace()
+        return ws.generate_codebase_map()
+    except Exception as e:
+        return f"[警告: 加载认知地图失败: {e}]"
+
+
 def build_system_prompt(
     generation: Optional[int] = None,
     total_generations: Optional[int] = None,
@@ -100,8 +126,8 @@ def build_system_prompt(
     Returns:
         组装完成的系统提示词字符串
     """
-    # 获取项目根目录
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 获取工作区提示词目录
+    prompts_dir = _get_workspace_prompts_dir()
 
     # 获取当前时间
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -114,23 +140,49 @@ def build_system_prompt(
         core_context = memory_data.get("core_context", "")
         current_goal = memory_data.get("current_goal", "")
 
-    # 加载各模块 Prompt
-    soul = _load_prompt_file(SOUL_FILE)
-    identity = _load_prompt_file(IDENTITY_FILE)
-    agents = _load_prompt_file(AGENTS_FILE)
-    user = _load_prompt_file(USER_FILE)
+    # 加载各模块 Prompt（从 workspace/prompts/ 读取）
+    soul = _load_prompt_file(os.path.join(prompts_dir, "SOUL.md"))
+    dynamic = _load_prompt_file(os.path.join(prompts_dir, "DYNAMIC.md"))
+    identity = _load_prompt_file(os.path.join(prompts_dir, "IDENTITY.md"))
+    agents = _load_prompt_file(os.path.join(prompts_dir, "AGENTS.md"))
+    user = _load_prompt_file(os.path.join(prompts_dir, "USER.md"))
     tools_index = _extract_tools_manual_index()
+    codebase_map = _load_codebase_map()
+
+    # 加载任务清单（强目标驱动与打勾收网）
+    task_checklist = _load_task_checklist()
 
     # 组装完整提示词
     prompt_parts = [
         soul,
+        "\n---\n",
+    ]
+
+    # 【关键位置】插入任务清单（在 SOUL.md 之后，最显眼）
+    if task_checklist:
+        prompt_parts.extend([
+            "## ⚡ 任务清单 ⚡\n",
+            task_checklist,
+            "\n\n---\n\n",
+        ])
+
+    # 插入代码库认知地图（放在任务清单之后）
+    if codebase_map:
+        prompt_parts.extend([
+            codebase_map,
+            "\n\n---\n\n",
+        ])
+
+    # 继续组装其他部分
+    prompt_parts.extend([
+        dynamic,
         "\n---\n",
         identity,
         "\n---\n",
         agents,
         "\n---\n",
         user,
-    ]
+    ])
 
     # 添加记忆上下文
     if core_context or current_goal:
@@ -151,11 +203,13 @@ def build_system_prompt(
         prompt_parts.append(tools_index)
 
     # 添加环境信息
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env_section = [
         "\n---\n",
         "## 当前环境\n",
         f"- 当前时间: {current_time}\n",
         f"- 项目根目录: {project_root}\n",
+        f"- 工作区: {os.path.join(project_root, 'workspace')}\n",
     ]
     prompt_parts.extend(env_section)
 

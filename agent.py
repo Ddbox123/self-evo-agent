@@ -23,6 +23,13 @@
 
 import os
 import sys
+
+# Windows 控制台编码修复
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 import datetime
 import time
 import logging
@@ -41,53 +48,70 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, Tool
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
-# 导入项目工具
+# 导入项目工具（统一从 tools 包导入）
+from tools import (
+    create_langchain_tools,  # LangChain 工具工厂
+    advanced_compress_context_tool,  # 压缩工具
+    EnhancedTokenCompressor,
+    estimate_messages_tokens,
+)
+from tools.task_tools import (
+    set_plan_tool,
+    tick_subtask_tool,
+    modify_task_tool,
+    add_task_tool,
+    remove_task_tool,
+    get_task_status,
+    check_restart_block,
+)
+from tools.ast_tools import list_file_entities, get_code_entity  # AST 工具
 from tools.web_tools import web_search, read_webpage
 from tools.cmd_tools import (
+    read_file, list_dir, edit_local_file, create_new_file, check_syntax,
+    list_symbols_in_file, backup_project, run_self_test, get_agent_status,
     run_cmd, run_powershell, run_batch,
-    read_file, list_dir,
-    edit_local_file, create_new_file,
-    check_syntax, backup_project,
-    list_symbols_in_file,
-    run_self_test, get_agent_status,
-    delete_file, cleanup_test_files,
 )
-from tools.rebirth_tools import trigger_self_restart
-# 高性能压缩工具（暂时禁用 - Python 3.14 兼容性问题）
-from tools.advanced_compress_tool import advanced_compress_context_tool
+from tools.search_tools import grep_search, find_function_calls, find_definitions, search_and_read
+from tools.code_tools import apply_diff_edit, validate_diff_format
+from tools.evolution_tracker import get_evolution_history, get_evolution_stats
 from tools.memory_tools import (
     read_memory, commit_compressed_memory, get_generation,
     get_core_context, get_current_goal, archive_generation_history,
-    read_generation_archive, list_archives, advance_generation, _load_memory
+    read_generation_archive, list_archives, advance_generation, _load_memory,
+    read_dynamic_prompt, update_generation_task, add_insight_to_dynamic
 )
-from tools.evolution_tracker import (
-    log_evolution,
-    get_evolution_history,
-    get_evolution_stats,
-)
-
-# 全局搜索和 Diff 编辑工具 (Cursor/Aider 范式)
-from tools.search_tools import grep_search, find_function_calls, find_definitions, search_imports, search_and_read
-from tools.code_tools import apply_diff_edit, validate_diff_format
-from tools.ast_tools import get_code_entity, list_file_entities
-from tools.memory_cleanup import compress_message_history, filter_exploration_messages, cleanup_after_success
-from tools.autonomous_task_generator import generate_autonomous_task
+from tools.rebirth_tools import trigger_self_restart
+from tools.cli_tools import execute_cli_command
 from tools.state_broadcaster import (
     StateBroadcaster, AgentStatus, get_broadcaster,
     update_agent_status, log_agent_event, get_agent_state
 )
+
+# 导入 CLI UI 渲染引擎
+from core.cli_ui import (
+    UIManager, get_ui, ui_print_header, ui_thinking,
+    ui_print_tool, ui_warning, ui_error, ui_success, ui_log,
+    ui_update_status, ui_task_board
+)
+
+# 导入优雅对话渲染器
+from core.transcript_logger import get_transcript_logger
+
+import traceback
+import threading
 
 
 # ============================================================================
 # 调试日志系统 - 统一管理 Agent 运行时的终端输出
 # ============================================================================
 
-import traceback
-import threading
+# 全局 UI 管理器实例
+_ui = get_ui()
 
+# 保留旧的 DebugLogger 以保持向后兼容，但内部使用 cli_ui
 class DebugLogger:
     """
-    统一调试日志系统
+    统一调试日志系统 - 基于 rich 的 Claude Code 级输出
 
     特性：
     - 带时间戳的格式化输出
@@ -126,87 +150,102 @@ class DebugLogger:
         """获取当前缩进"""
         return self._indent_char * self._indent_level
 
-    def _format(self, tag: str, msg: str, color_tag: str = "") -> str:
+    def _format(self, tag: str, msg: str) -> str:
         """格式化日志消息"""
         parts = []
         if self.show_timestamps:
             parts.append(f"[{self._timestamp()}]")
         parts.append(f"[{tag}]")
-        if color_tag:
-            parts.append(f"<{color_tag}>")
         parts.append(f"{self._indent()}{msg}")
         return " ".join(parts)
 
     def debug(self, msg: str, tag: str = "DEBUG"):
         """调试信息"""
         if self.verbose:
-            print(self._format(tag, msg, "dim"))
+            ui_log(msg, "DEBUG")
 
     def info(self, msg: str, tag: str = "INFO"):
         """一般信息"""
-        print(self._format(tag, msg))
+        ui_log(msg, "INFO")
 
     def success(self, msg: str, tag: str = "OK"):
         """成功信息"""
-        print(self._format(tag, f"✓ {msg}", "green"))
+        ui_success(msg)
 
     def warning(self, msg: str, tag: str = "WARN"):
         """警告信息"""
-        print(self._format(tag, f"⚠ {msg}", "yellow"))
+        ui_warning(msg)
 
     def error(self, msg: str, tag: str = "ERROR", exc_info: bool = False):
-        """
-        错误信息（自动包含详细上下文）
-
-        Args:
-            msg: 错误消息
-            tag: 标签
-            exc_info: 是否包含异常堆栈
-        """
-        print(self._format(tag, f"✗ {msg}", "red"))
-        if exc_info:
-            tb = traceback.format_exc()
-            for line in tb.strip().split('\n'):
-                print(f"    {line}")
+        """错误信息"""
+        ui_error(msg, traceback.format_exc() if exc_info else None)
 
     def system(self, msg: str, tag: str = "SYS"):
         """系统信息"""
-        print(self._format(tag, f"◆ {msg}", "cyan"))
+        ui_log(msg, "SYS")
 
     def tool(self, name: str, status: str, details: str = ""):
-        """
-        工具执行日志
-
-        Args:
-            name: 工具名称
-            status: 执行状态 (called/success/error/timeout)
-            details: 详细信息
-        """
-        status_symbols = {
-            "called": "→",
-            "success": "✓",
-            "error": "✗",
-            "timeout": "⏱",
-            "skipped": "○"
-        }
-        sym = status_symbols.get(status, "?")
-        msg = f"Tool: {name} {sym}"
-        if details:
-            msg += f" | {details}"
-        print(self._format("TOOL", msg))
+        """工具执行日志"""
+        ui_log(f"Tool: {name} {status} {details}", "TOOL")
 
     def llm(self, msg: str, details: str = ""):
-        """
-        LLM 调用日志
+        """LLM 调用日志"""
+        ui_log(f"{msg} {details}", "LLM")
 
-        Args:
-            msg: 消息
-            details: 详细信息（如 token 用量）
-        """
-        display = msg[:80] + "..." if len(msg) > 80 else msg
-        print(self._format("LLM", display))
-        if details:
-            print(self._format("LLM", f"  └─ {details}"))
+    def llm_response(self, content: str, prefix: str = "LLM 回复"):
+        """打印完整的 LLM 输出内容"""
+        _ui.console.print()
+        _ui.console.print(f"[bold magenta]--- {prefix} ---[/bold magenta]")
+        _ui.console.print(content[:500], style="dim")
+        _ui.console.print(f"[bold magenta]---[/bold magenta]")
+        _ui.console.print()
+
+    def llm_thinking(self, content: str):
+        """打印 LLM 的思考过程"""
+        _ui.console.print()
+        _ui.console.print("[bold magenta]-- Thinking --[/bold magenta]")
+        for line in content.split('\n')[:10]:
+            if line.strip():
+                _ui.console.print(f"  {line[:100]}", style="dim")
+        _ui.console.print()
+
+    def tool_start(self, tool_name: str, args: dict):
+        """打印工具开始调用"""
+        ui_print_tool(tool_name, args)
+
+    def tool_result(self, tool_name: str, result: str, success: bool = True):
+        """打印工具执行结果"""
+        ui_print_tool(tool_name, result=result, success=success)
+
+    def session_start(self, model: str, generation: int = 1):
+        """开始会话"""
+        ui_print_header(model, generation)
+        ui_update_status("AWAKENING", generation=generation)
+
+    def turn_end(self, turn_num: int, tool_count: int = 0):
+        """结束一轮对话"""
+        ui_log(f"Turn {turn_num} complete | Tools: {tool_count}", "TURN")
+
+    def section(self, title: str):
+        """分节标题"""
+        _ui.console.print()
+        _ui.console.print(f"[bold cyan]=== {title} ===[/bold cyan]")
+
+    def divider(self, char: str = "-", length: int = 60):
+        """分隔线"""
+        _ui.console.print(char * length)
+
+    def kv(self, key: str, value: str):
+        """键值对输出"""
+        _ui.console.print(f"  [cyan]{key}[/cyan]: {value}")
+
+    def banner(self, title: str):
+        """横幅"""
+        _ui.console.print()
+        _ui.console.print(f"[bold cyan]{'=' * 60}[/bold cyan]")
+        _ui.console.print(f"[bold cyan]  {title}[/bold cyan]")
+        _ui.console.print(f"[bold cyan]{'=' * 60}[/bold cyan]")
+        _ui.console.print()
 
     def indent(self):
         """增加缩进"""
@@ -230,6 +269,54 @@ class DebugLogger:
     def kv(self, key: str, value: str):
         """键值对输出"""
         print(self._format("INFO", f"  {key:<20} = {value}"))
+
+    def turn_start(self, turn_num: int, context: str = ""):
+        """
+        开始新的轮次（打印分隔线和标题）
+
+        Args:
+            turn_num: 轮次编号
+            context: 上下文信息
+        """
+        print()
+        print(f"{'═'*70}")
+        print(f"  🔄 第 {turn_num} 轮对话")
+        if context:
+            print(f"  📋 {context}")
+        print(f"{'═'*70}")
+        print()
+
+    # Legacy methods kept for compatibility (now delegate to cli_ui)
+    def turn_end(self, turn_num: int, tool_count: int = 0):
+        """结束一轮对话"""
+        ui_log(f"Turn {turn_num} complete | Tools: {tool_count}", "TURN")
+
+    def session_start(self, model: str, generation: int = 1):
+        """开始会话"""
+        ui_print_header(model, generation)
+        ui_update_status("AWAKENING", generation=generation)
+
+    def section(self, title: str):
+        """分节标题"""
+        _ui.console.print()
+        _ui.console.print(f"[bold cyan]=== {title} ===[/bold cyan]")
+
+    def divider(self, char: str = "-", length: int = 60):
+        """分隔线"""
+        _ui.console.print(char * length)
+
+    def kv(self, key: str, value: str):
+        """键值对输出"""
+        _ui.console.print(f"  [cyan]{key}[/cyan]: {value}")
+
+    def banner(self, title: str):
+        """横幅"""
+        _ui.console.print()
+        _ui.console.print(f"[bold cyan]{'=' * 60}[/bold cyan]")
+        _ui.console.print(f"[bold cyan]  {title}[/bold cyan]")
+        _ui.console.print(f"[bold cyan]{'=' * 60}[/bold cyan]")
+        _ui.console.print()
+
 
 # 全局实例
 debug = DebugLogger()
@@ -437,14 +524,17 @@ class ConversationLogger:
 # 全局实例
 conversation_logger = ConversationLogger()
 
+# 优雅对话渲染器（Markdown 格式）
+transcript_logger = get_transcript_logger()
+
 
 def _get_total_generations() -> int:
     """获取总世代数"""
     memory = _load_memory()
     return memory.get("total_generations", 1)
 from tools.token_manager import (
-    EnhancedTokenCompressor, truncate_tool_result, estimate_tokens_precise,
-    estimate_messages_tokens, DEFAULT_TOKEN_BUDGET, MAX_TOOL_RESULT_TOKENS,
+    EnhancedTokenCompressor, estimate_tokens_precise,
+    estimate_messages_tokens, DEFAULT_TOKEN_BUDGET,
     CORE_SUMMARY_CHARS, COMPRESSION_TRIGGER_RATIO, COMPRESSION_WARNING_RATIO,
     MessagePriority, truncate_by_priority, format_compression_report,
 )
@@ -452,7 +542,7 @@ from core.prompt_builder import build_system_prompt
 
 
 def print_evolution_time():
-    """打印当前系统时间，宣告进化成功"""
+    """打印当前系统时间"""
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     debug.system(f"系统时间: {current_time}", tag="EVOLVE")
 
@@ -470,17 +560,11 @@ COMPRESSION_MODEL = "qwen-turbo"  # 压缩用模型
 def estimate_tokens(text: str) -> int:
     """
     估算文本的 Token 数量。
-    
-    使用字符数 / 2 作为粗略估算（中文约 1 token = 1.5-2 字符，英文约 4 字符）
-    保守估计取 2，以避免实际 token 超限。
-    
-    Args:
-        text: 待估算的文本
-        
-    Returns:
-        估算的 token 数量
+
+    使用精确估算函数，避免低估。
     """
-    return len(text) // 2
+    from tools.token_manager import estimate_tokens_precise
+    return estimate_tokens_precise(text)
 
 
 def estimate_messages_tokens(messages: list) -> int:
@@ -555,9 +639,6 @@ def compress_agent_scratchpad(
         return f"[压缩失败: {str(e)}]"
 
 
-# ============================================================================
-# 系统提示词已迁移至 prompts/ 目录和 core/prompt_builder.py
-# ============================================================================
 
 
 # ============================================================================
@@ -585,742 +666,6 @@ def setup_logging(level: str = "INFO", log_format: Optional[str] = None) -> logg
         stream=sys.stdout
     )
     return logging.getLogger("SelfEvolvingAgent")
-
-
-# ============================================================================
-# LangChain Tool 包装器
-# ============================================================================
-
-def create_langchain_tools() -> list[BaseTool]:
-    """
-    将项目工具包装为 LangChain Tool。
-    
-    Returns:
-        LangChain Tool 列表
-    """
-    from langchain_core.tools import tool
-    
-    @tool
-    def web_search_tool(query: str) -> str:
-        """
-        搜索互联网获取最新信息。
-        
-        Args:
-            query: 搜索关键词
-            
-        Returns:
-            搜索结果摘要
-        """
-        return web_search(query)
-    
-    @tool
-    def read_webpage_tool(url: str) -> str:
-        """
-        读取指定网页的完整内容。
-        
-        Args:
-            url: 网页 URL
-            
-        Returns:
-            网页正文内容
-        """
-        return read_webpage(url)
-    
-    @tool
-    def list_directory_tool(path: str, show_hidden: bool = False, recursive: bool = False) -> str:
-        """
-        列出目录内容和文件信息。
-
-        Args:
-            path: 目录路径，默认为 "."（当前目录）
-            show_hidden: 是否显示隐藏文件，默认 False
-            recursive: 是否递归列出子目录，默认 False
-
-        Returns:
-            格式化的目录列表
-        """
-        return list_dir(path, show_hidden=show_hidden, recursive=recursive)
-
-    @tool
-    def read_local_file_tool(file_path: str, max_lines: int = None, offset: int = 0) -> str:
-        """
-        读取本地文件内容。
-
-        Args:
-            file_path: 文件路径
-            max_lines: 最大读取行数，默认 None（读取全部）
-            offset: 从第几行开始读取（0-based），用于跳过大段代码，默认 0
-
-        Returns:
-            格式化的文件内容（带行号）
-        """
-        return read_file(file_path, max_lines=max_lines, offset=offset)
-    
-    @tool
-    def edit_local_file_tool(file_path: str, search_string: str, replace_string: str) -> str:
-        """
-        编辑本地文件，替换指定内容。
-        
-        注意：必须精确匹配搜索字符串才能替换！
-        编辑后请立即使用 check_syntax 进行语法自检。
-        
-        Args:
-            file_path: 文件路径
-            search_string: 要替换的原字符串
-            replace_string: 替换后的新字符串
-            
-        Returns:
-            操作结果
-        """
-        return edit_local_file(file_path, search_string, replace_string)
-    
-    @tool
-    def create_new_file_tool(file_path: str, content: str, use_workspace: bool = True) -> str:
-        """
-        创建新文件或覆盖现有文件。
-
-        Args:
-            file_path: 文件路径（可以是相对或绝对路径）
-            content: 文件内容
-            use_workspace: 是否使用工作区域目录（默认True）
-                           如果为 True，文件会创建在 workspace/ 目录下
-                           如果为 False，在项目根目录下创建
-
-        Returns:
-            操作结果
-        """
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        workspace = os.path.join(project_root, "workspace")
-        
-        # 如果是相对路径且启用工作区域，自动加上 workspace 前缀
-        if use_workspace and not os.path.isabs(file_path):
-            # 如果路径已经以 workspace 开头，不再重复添加
-            if not file_path.startswith("workspace"):
-                file_path = os.path.join("workspace", file_path)
-        
-        # 确保目录存在
-        abs_path = os.path.abspath(file_path)
-        parent_dir = os.path.dirname(abs_path)
-        os.makedirs(parent_dir, exist_ok=True)
-        
-        return create_new_file(file_path, content)
-    
-    @tool
-    def check_syntax_tool(file_path: str) -> str:
-        """
-        检查 Python 文件的语法正确性。
-
-        这是代码修改后必须调用的自检工具！
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            "Syntax OK" 或详细错误信息
-        """
-        return check_syntax(file_path)
-
-    @tool
-    def list_symbols_in_file_tool(file_path: str) -> str:
-        """
-        提取 Python 文件中的符号大纲（Cursor Outline 视图）。
-
-        使用 AST 解析，只返回 class/def/全局变量 的名称和行号，
-        **不读取函数体内容**，极度节省 Token。
-
-        使用场景：
-        - 修改某函数前，先用此工具定位其在文件中的行号
-        - 避免读取整个大文件，节省 Token
-
-        Args:
-            file_path: Python 文件路径
-
-        Returns:
-            格式化的符号列表，包含类型(COLASS/DEF/GLOBAL)、名称、行号
-        """
-        return list_symbols_in_file(file_path)
-    
-    @tool
-    def backup_project_tool(version_note: str = "") -> str:
-        """
-        备份整个项目。
-        
-        Args:
-            version_note: 备份说明
-            
-        Returns:
-            备份结果
-        """
-        return backup_project(version_note)
-    
-    @tool
-    def trigger_self_restart_tool(reason: str = "") -> str:
-        """
-        触发 Agent 自我重启。
-
-        用于应用代码更新。每次代码修改并自检通过后必须调用！
-
-        Args:
-            reason: 重启原因
-
-        Returns:
-            操作结果（原进程将退出）
-        """
-        return trigger_self_restart(reason)
-
-    @tool
-    def read_generation_archive_tool(generation: int) -> str:
-        """
-        读取指定世代的详细档案。
-
-        当当前世代的核心智慧不足以解决问题时，可以读取前几代的详细档案。
-
-        Args:
-            generation: 世代编号（如 1, 2, 3...）
-
-        Returns:
-            世代档案的JSON字符串，包含完整的思考过程和工具调用记录
-        """
-        return read_generation_archive(generation)
-
-    @tool
-    def list_generation_archives_tool() -> str:
-        """
-        列出所有可用的世代档案。
-
-        Returns:
-            档案列表，包含文件名、大小、修改时间
-        """
-        return list_archives()
-    
-    @tool
-    def read_memory_tool() -> str:
-        """
-        读取当前的压缩记忆。
-        
-        返回跨越多次重启积累的状态：
-        - generation: 当前世代
-        - core_context: 提炼后的历史上下文
-        - current_goal: 本世代核心目标
-        
-        Returns:
-            记忆的 JSON 字符串
-        """
-        return read_memory()
-    
-    @tool
-    def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
-        """
-        覆盖式更新记忆（记忆坍缩）。
-
-        【极度重要】在调用 trigger_self_restart 之前必须先调用此函数！
-        会覆盖旧的 core_context，用不超过300字的新摘要替换。
-
-        Args:
-            new_core_context: 压缩后的新上下文摘要（不超过300字）
-            next_goal: 下一代需要接着做的具体任务
-
-        Returns:
-            更新结果
-        """
-        return commit_compressed_memory(new_core_context, next_goal)
-
-    @tool
-    def compress_context_tool(reason: str = "") -> str:
-        """
-        主动压缩对话上下文，专注于主要任务。
-
-        当对话历史过长导致 AI 无法专注时，可调用此工具压缩上下文。
-        会保留系统提示、最近的用户输入和最近的交互对，其余历史压缩为摘要。
-
-        Args:
-            reason: 压缩原因（可选）
-
-        Returns:
-            压缩结果，包含压缩前后的 Token 数对比、saved_tokens、compression_ratio 等指标的 JSON 字符串。
-        """
-        # 使用高级压缩工具
-        return advanced_compress_context_tool(reason=reason)
-        
-        
-        # 创建压缩器实例
-        compressor = create_compressor(
-            token_budget=4096,
-        )
-        
-        # 构造测试消息
-        messages = [
-            {"role": "system", "content": "你是自我进化 AI Agent"}, 
-            {"role": "user", "content": "测试压缩"}
-        ]
-        
-        try:
-            # 执行压缩
-            compressed_messages, summary = compressor.compress(messages)
-            
-            # 计算压缩前后的 token 数
-            before_tokens = estimate_messages_tokens(messages)
-            after_tokens = estimate_messages_tokens(compressed_messages)
-            
-            # 计算节省的 tokens 和压缩率
-            saved_tokens = before_tokens - after_tokens if before_tokens > after_tokens else 0
-            compression_ratio = (before_tokens - after_tokens) / before_tokens if before_tokens > 0 else 0
-            
-            # 构建结构化返回结果
-            result = {
-                "saved_tokens": saved_tokens,
-                "compression_ratio": round(compression_ratio, 4),
-                "before_tokens": before_tokens,
-                "after_tokens": after_tokens,
-                "summary": summary,
-                "status": "success",
-                "reason": reason
-            }
-            
-            return json.dumps(result, ensure_ascii=False, indent=2)
-        
-        except Exception as e:
-            # 错误处理
-            result = {
-                "saved_tokens": 0,
-                "compression_ratio": 0.0,
-                "before_tokens": 0,
-                "after_tokens": 0,
-                "summary": "",
-                "status": "error",
-                "reason": str(e)
-            }
-            return json.dumps(result, ensure_ascii=False, indent=2)
-
-    @tool
-    def run_self_test_tool() -> str:
-        """
-        运行 Agent 核心功能的自我测试。
-
-        测试内容：
-        1. 核心模块导入
-        2. 配置文件可用性
-        3. 工具模块可用性
-        4. restarter.py 可用性
-        5. 记忆系统可用性
-
-        Returns:
-            测试结果报告
-        """
-        return run_self_test()
-
-    @tool
-    def get_agent_status_tool() -> str:
-        """
-        获取 Agent 当前状态概览。
-
-        返回当前世代、目标、上下文和进化统计。
-
-        Returns:
-            状态报告
-        """
-        status = get_agent_status()
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        workspace = os.path.join(project_root, "workspace")
-        
-        # 添加工作区域信息
-        status_lines = status.split('\n')
-        workspace_info = [
-            "",
-            f"工作区域: {workspace}",
-        ]
-        
-        # 在合适位置插入
-        for i, line in enumerate(status_lines):
-            if line.startswith("工作目录:"):
-                status_lines.insert(i + 1, f"工作区域: {workspace}")
-                break
-        
-        return '\n'.join(status_lines)
-
-    @tool
-    def enter_hibernation_tool(reason: str = "", duration: int = 300) -> str:
-        """
-        主动进入休眠状态。当 Agent 判断当前任务已完成或无需继续工作时应调用此工具。
-
-        调用后 Agent 将进入休眠，等待指定时间后自动苏醒继续工作。
-        这比被动等待固定间隔更高效。
-
-        Args:
-            reason: 休眠原因（可选），用于日志记录
-            duration: 休眠时长（秒），默认 300 秒（5 分钟）
-                      - 短时休眠: 60-120 秒（任务接近完成）
-                      - 中时休眠: 300-600 秒（任务已完成，等待新任务）
-                      - 长时休眠: 1800+ 秒（长时间无任务）
-
-        Returns:
-            休眠确认信息
-        """
-        from datetime import datetime, timedelta
-        wake_time = datetime.now() + timedelta(seconds=duration)
-        return f"[休眠确认] Agent 将进入休眠状态。\n原因: {reason or '任务已完成/无需继续'}\n休眠时长: {duration} 秒\n预计苏醒时间: {wake_time.strftime('%H:%M:%S')}"
-
-    @tool
-    def get_evolution_history_tool(limit: int = 10) -> str:
-        """
-        获取进化历史记录。
-
-        Args:
-            limit: 返回的最近记录条数
-
-        Returns:
-            格式化的历史记录
-        """
-        return get_evolution_history(limit)
-
-    @tool
-    def log_evolution_tool(file_modified: str, change_type: str, reason: str,
-                          success: bool, details: str = "") -> str:
-        """
-        记录一次自我修改到进化历史。
-
-        【重要】每次代码修改后应调用此函数记录变更。
-
-        Args:
-            file_modified: 被修改的文件
-            change_type: 变更类型 ("add", "modify", "delete")
-            reason: 修改原因
-            success: 是否成功
-            details: 详细信息
-
-        Returns:
-            操作结果
-        """
-        from tools.memory_tools import get_generation
-        return log_evolution(
-            generation=get_generation(),
-            file_modified=file_modified,
-            change_type=change_type,
-            reason=reason,
-            success=success,
-            details=details,
-        )
-
-    @tool
-    def grep_search_tool(regex_pattern: str, include_ext: str = ".py",
-                         search_dir: str = ".", case_sensitive: bool = True,
-                         max_results: int = 500) -> str:
-        """
-        全局正则表达式搜索 (Cursor/Aider 范式)。
-
-        在项目中快速搜索代码，支持正则表达式。优先于 read_local_file_tool 使用！
-
-        适用场景：
-        - 查找函数/变量定义位置
-        - 查找函数的所有调用
-        - 查找 import 语句
-        - 快速定位关键词
-
-        Args:
-            regex_pattern: 正则表达式模式
-            include_ext: 要搜索的文件类型，默认 ".py"
-            search_dir: 搜索目录，默认当前目录
-            case_sensitive: 是否区分大小写，默认 True
-            max_results: 最大返回结果数
-
-        Returns:
-            格式化的搜索结果，包含文件路径、行号和匹配内容
-        """
-        return grep_search(
-            regex_pattern=regex_pattern,
-            include_ext=include_ext,
-            search_dir=search_dir,
-            case_sensitive=case_sensitive,
-            max_results=max_results
-        )
-
-    @tool
-    def apply_diff_edit_tool(file_path: str, diff_text: str) -> str:
-        """
-        Diff Block 编辑器 (Cursor/Aider 范式)。
-
-        使用 SEARCH/REPLACE 块格式精准替换代码。比 edit_local_file_tool 更可靠！
-
-        格式：
-        <<<<<<< SEARCH
-        要替换的旧代码
-        =======
-        新代码
-        >>>>>>> REPLACE
-
-        可包含多个块一次性修改多处！
-
-        Args:
-            file_path: 要编辑的文件路径
-            diff_text: SEARCH/REPLACE 块文本
-
-        Returns:
-            操作结果描述
-        """
-        return apply_diff_edit(file_path=file_path, diff_text=diff_text)
-
-    @tool
-    def validate_diff_format_tool(diff_text: str) -> str:
-        """
-        验证 diff_text 格式是否正确。
-
-        在实际编辑前验证格式，避免无效修改。
-
-        Args:
-            diff_text: 要验证的 diff 块文本
-
-        Returns:
-            验证结果
-        """
-        is_valid, message = validate_diff_format(diff_text)
-        return message
-
-    @tool
-    def find_function_calls_tool(function_name: str, search_dir: str = ".",
-                                  include_ext: str = ".py") -> str:
-        """
-        查找特定函数的所有调用位置。
-
-        Args:
-            function_name: 函数名
-            search_dir: 搜索目录
-            include_ext: 文件类型
-
-        Returns:
-            所有调用位置的列表
-        """
-        return find_function_calls(function_name, search_dir, include_ext)
-
-    @tool
-    def find_definitions_tool(symbol_name: str, search_dir: str = ".",
-                               include_ext: str = ".py") -> str:
-        """
-        查找符号（函数、类、变量）的定义位置。
-
-        Args:
-            symbol_name: 符号名
-            search_dir: 搜索目录
-            include_ext: 文件类型
-
-        Returns:
-            所有定义位置的列表
-        """
-        return find_definitions(symbol_name, search_dir, include_ext)
-
-    @tool
-    def get_code_entity_tool(file_path: str, entity_name: str) -> str:
-        """
-        AST 一击必中 - 直接提取类或函数的完整代码。
-
-        使用 Python AST 语法树解析，直接按名称提取代码实体。
-        一轮调用获取完整代码，无需多次读取文件！
-
-        适用场景：
-        - 知道要修改的函数/类名，直接提取其完整代码
-        - 快速获取某个实体的大小和结构
-        - 无需手动找行号，一次性看完
-
-        Args:
-            file_path: Python 文件路径
-            entity_name: 要提取的实体名称（类名或函数名）
-
-        Returns:
-            实体的完整代码及行号范围
-        """
-        return get_code_entity(file_path, entity_name)
-
-    @tool
-    def list_file_entities_tool(file_path: str, entity_type: str = None) -> str:
-        """
-        列出文件中的所有类和函数。
-
-        使用 AST 解析，快速获取文件的代码结构概览。
-
-        Args:
-            file_path: Python 文件路径
-            entity_type: 过滤类型 ('class', 'function', None 表示全部)
-
-        Returns:
-            实体列表
-        """
-        return list_file_entities(file_path, entity_type)
-
-    @tool
-    def search_and_read_tool(
-        query: str,
-        context_lines: int = 5,
-        include_ext: str = ".py",
-        search_dir: str = ".",
-        max_matches: int = 50
-    ) -> str:
-        """
-        搜索并读取 - 一步到位的代码检索。
-
-        在项目中全局搜索 query，对于每个匹配项，自动携带上下文行返回代码。
-        将原来需要 2-3 轮 LLM 交互的操作压缩为 1 轮。
-
-        适用场景：
-        - 想了解某个关键词在项目中的所有使用方式
-        - 需要查看匹配行的完整上下文
-        - 全局搜索 + 上下文预览
-
-        Args:
-            query: 搜索关键词（支持正则表达式）
-            context_lines: 每个匹配项返回的上下文行数
-            include_ext: 文件类型过滤
-            search_dir: 搜索目录
-            max_matches: 最大匹配数
-
-        Returns:
-            格式化的搜索结果，每个匹配包含完整的上下文代码块
-        """
-        return search_and_read(
-            query=query,
-            context_lines=context_lines,
-            include_ext=include_ext,
-            search_dir=search_dir,
-            max_matches=max_matches
-        )
-
-    @tool
-    def run_cmd_tool(command: str, timeout: int = 60, shell: bool = True,
-                    cwd: str = None, check_safety: bool = True) -> str:
-        """
-        执行 CMD 命令并返回输出结果。
-
-        在 Windows 环境下执行指定的命令，返回标准输出和标准错误。
-        支持超时控制，防止命令执行过久导致阻塞。
-        包含危险命令黑名单机制，自动拦截危险操作。
-
-        Args:
-            command: 要执行的命令（如 "dir", "ipconfig /all", "python script.py"）
-            timeout: 命令执行超时时间（秒），默认 60 秒
-            shell: 是否使用 shell 执行，默认 True
-            cwd: 命令执行的工作目录，默认当前目录
-            check_safety: 是否执行安全检查，默认 True
-
-        Returns:
-            格式化的执行结果字符串
-        """
-        return run_cmd(command, timeout=timeout, shell=shell, cwd=cwd, check_safety=check_safety)
-
-    @tool
-    def run_powershell_tool(command: str, timeout: int = 60, cwd: str = None) -> str:
-        """
-        通过 PowerShell 执行命令（Windows 专用）。
-
-        专门用于执行 PowerShell 命令，某些 Windows 特有功能使用 PowerShell 更方便。
-
-        Args:
-            command: 要执行的 PowerShell 命令
-            timeout: 超时时间（秒），默认 60 秒
-            cwd: 工作目录，默认当前目录
-
-        Returns:
-            格式化的执行结果字符串
-        """
-        return run_powershell(command, timeout=timeout, cwd=cwd)
-
-    @tool
-    def run_batch_tool(commands: str, timeout: int = 60, cwd: str = None) -> str:
-        """
-        批量执行多个 CMD 命令。
-
-        按顺序执行多个命令，每个命令之间用 && 连接。
-        任何一个命令失败，整个批次会停止。
-
-        Args:
-            commands: 命令列表（JSON格式的字符串数组），如 '["cd src", "dir"]'
-            timeout: 总超时时间（秒），默认 60 秒
-            cwd: 工作目录，默认当前目录
-
-        Returns:
-            格式化的执行结果字符串
-        """
-        import json
-        try:
-            cmd_list = json.loads(commands)
-            if not isinstance(cmd_list, list):
-                return "[错误] commands 参数必须是 JSON 数组格式"
-            return run_batch(cmd_list, timeout=timeout, cwd=cwd)
-        except json.JSONDecodeError as e:
-            return f"[错误] JSON 解析失败: {e}"
-
-    @tool
-    def delete_file_tool(file_path: str, force: bool = False) -> str:
-        """
-        删除指定的文件或目录。
-
-        【好习惯】完成测试任务后，自动清理测试产生的临时文件。
-        保持工作目录整洁，避免垃圾文件堆积。
-
-        Args:
-            file_path: 要删除的文件或目录路径
-            force: 是否强制删除（跳过文件类型检查，仅用于确认安全的临时文件）
-
-        Returns:
-            操作结果描述
-        """
-        return delete_file(file_path, force=force)
-
-    @tool
-    def cleanup_test_files_tool(directory: str = ".", dry_run: bool = True) -> str:
-        """
-        清理指定目录下的测试相关临时文件。
-
-        【好习惯】定期清理测试产生的临时文件，避免垃圾堆积。
-        支持扫描并清理：test_*.py、__pycache__、*.pyc、*.log 等。
-
-        Args:
-            directory: 要扫描的目录，默认为当前目录
-            dry_run: 是否仅模拟运行（默认 True，显示找到的文件但不实际删除）
-                     设置为 False 时会实际删除文件
-
-        Returns:
-            操作结果描述，包含找到的可删除文件列表
-        """
-        return cleanup_test_files(directory=directory, dry_run=dry_run)
-
-    return [
-        web_search_tool,
-        read_webpage_tool,
-        list_directory_tool,
-        read_local_file_tool,
-        edit_local_file_tool,
-        create_new_file_tool,
-        check_syntax_tool,
-        list_symbols_in_file_tool,
-        backup_project_tool,
-        trigger_self_restart_tool,
-        read_memory_tool,
-        commit_compressed_memory_tool,
-        read_generation_archive_tool,
-        list_generation_archives_tool,
-        # high_performance_compress_context_tool,  # 暂时禁用
-        run_self_test_tool,
-        get_agent_status_tool,
-        enter_hibernation_tool,
-        get_evolution_history_tool,
-        log_evolution_tool,
-        run_cmd_tool,
-        run_powershell_tool,
-        run_batch_tool,
-        # Cursor/Aider 范式工具
-        grep_search_tool,
-        apply_diff_edit_tool,
-        validate_diff_format_tool,
-        find_function_calls_tool,
-        find_definitions_tool,
-        # AST 一击必中工具
-        get_code_entity_tool,
-        list_file_entities_tool,
-        search_and_read_tool,
-        # 自主任务生成器
-        generate_autonomous_task,
-        # 文件清理工具（好习惯）
-        delete_file_tool,
-        cleanup_test_files_tool,
-    ]
 
 
 # ============================================================================
@@ -1385,10 +730,17 @@ class SelfEvolvingAgent:
         
         if self.config.llm.api_base:
             llm_kwargs["base_url"] = self.config.llm.api_base
-        
+
+        # 添加超时配置
+        llm_kwargs["timeout"] = getattr(self.config.llm, 'api_timeout', 120)
+        llm_kwargs["request_timeout"] = llm_kwargs["timeout"]
+
         self.llm = ChatOpenAI(**llm_kwargs)
         self.model_name = self.config.llm.model_name
-        
+
+        # System Prompt 写入标记（用于 Markdown 双写）
+        self._system_prompt_written = False
+
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.tools)
         
@@ -1400,6 +752,11 @@ class SelfEvolvingAgent:
         }
         if self.config.llm.api_base:
             compression_llm_kwargs["base_url"] = self.config.llm.api_base
+
+        # 添加超时配置
+        compression_llm_kwargs["timeout"] = getattr(self.config.llm, 'api_timeout', 120)
+        compression_llm_kwargs["request_timeout"] = compression_llm_kwargs["timeout"]
+
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
 
         # 创建 OpenCLAW 风格的 Token 压缩器
@@ -1613,23 +970,7 @@ class SelfEvolvingAgent:
         conversation_logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
         
         return compressed
-    
-    def _format_tool_result(self, tool_name: str, result: str) -> str:
-        """
-        格式化工具执行结果。
-        
-        Args:
-            tool_name: 工具名称
-            result: 执行结果
-            
-        Returns:
-            格式化的结果字符串
-        """
-        # 使用 OpenCLAW 风格的智能截断
-        truncated = truncate_tool_result(result, max_chars=MAX_TOOL_RESULT_TOKENS * 2)
-        
-        return f"[{tool_name}] 结果:\n{truncated}"
-    
+
     def _should_restart(self, message: str) -> bool:
         """
         检查消息是否表示需要重启。
@@ -1668,24 +1009,31 @@ class SelfEvolvingAgent:
         Returns:
             如果应该继续运行返回 True，如果触发了重启返回 False
         """
-
-        # ========== 感知阶段：自动获取外部知识 ==========
-        # 首次苏醒时获取最新知识作为进化参考
-        if self.global_consecutive_count == 0:
-            try:
-                external_knowledge = self._acquire_external_knowledge()
-                if external_knowledge:
-                    debug.system("已获取外部知识参考", tag="KNOWLEDGE")
-            except Exception as e:
-                debug.warning(f"知识摄取失败: {e}", tag="KNOWLEDGE")
-
         messages = [SystemMessage(content=self._build_system_prompt())]
+
+        # 获取当前轮次编号（使用 conversation_logger 作为唯一真相来源）
+        # 注意：必须在 log_user_input 之后计算，因为 log_user_input 会递增计数器
+        if user_prompt:
+            conversation_logger.log_user_input(user_prompt)
+            current_turn = conversation_logger._turn_count
+        else:
+            current_turn = conversation_logger._turn_count + 1
+
+        # 首次对话：写入 System Prompt（折叠形式）
+        if not self._system_prompt_written:
+            system_prompt_content = self._build_system_prompt()
+            transcript_logger.write_system_prompt(system_prompt_content)
+            self._system_prompt_written = True
 
         if user_prompt:
             messages.append(HumanMessage(content=user_prompt))
-            debug.info(f"用户输入: {user_prompt[:60]}...", tag="USER")
-            conversation_logger.log_user_input(user_prompt)
+            # 双写：Markdown 格式
+            transcript_logger.start_turn(current_turn)
+            transcript_logger.write_user_input(user_prompt)
+        else:
+            transcript_logger.start_turn(current_turn)
 
+        # 打印会话开始信息（只在第一次）
         conversation_logger.log_llm_request(messages, model=self.model_name)
         max_iterations = self.config.agent.max_iterations
         iterations = 0
@@ -1694,8 +1042,63 @@ class SelfEvolvingAgent:
             while iterations < max_iterations:
                 iterations += 1
 
-                # 调用 LLM
-                response = self.llm_with_tools.invoke(messages)
+                # ========== 【新增】自动 Token 检查与压缩 ==========
+                # 在每次 LLM 调用前检查 Token 预算
+                current_tokens = estimate_messages_tokens(messages)
+                max_budget = self.config.context_compression.max_token_limit
+                
+                # 预压缩阈值：60% 时提前压缩
+                preemptive_threshold = int(max_budget * 0.6)
+                # 强制压缩阈值：80% 时必须压缩
+                forced_threshold = int(max_budget * 0.8)
+                
+                if current_tokens > forced_threshold:
+                    # 强制压缩
+                    debug.warning(f"[压缩] Token 过高 ({current_tokens}/{max_budget})，自动压缩", tag="TOKEN")
+                    old_tokens = current_tokens
+                    messages = self._compress_context(messages)
+                    new_tokens = estimate_messages_tokens(messages)
+                    debug.success(f"[压缩完成] {old_tokens} -> {new_tokens} (节省 {old_tokens - new_tokens})", tag="TOKEN")
+                    conversation_logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
+                    # 双写：Markdown 格式
+                    transcript_logger.write_compression(old_tokens, new_tokens, old_tokens - new_tokens)
+                elif current_tokens > preemptive_threshold and iterations > 1:
+                    # 预压缩（跳过第一次迭代，避免过早压缩）
+                    debug.info(f"[预压缩] Token 接近阈值 ({current_tokens}/{max_budget})，提前压缩", tag="TOKEN")
+                    old_tokens = current_tokens
+                    messages = self._compress_context(messages)
+                    new_tokens = estimate_messages_tokens(messages)
+                    debug.success(f"[预压缩完成] {old_tokens} -> {new_tokens}", tag="TOKEN")
+                    # 双写：Markdown 格式
+                    transcript_logger.write_compression(old_tokens, new_tokens, old_tokens - new_tokens)
+                # ========== 自动 Token 检查结束 ==========
+
+                # 第一次循环打印会话开始
+                if iterations == 1:
+                    debug.session_start(self.model_name, get_generation())
+
+                # 调用 LLM（带超时）
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+                def invoke_llm():
+                    return self.llm_with_tools.invoke(messages)
+
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(invoke_llm)
+                    try:
+                        # 使用配置中的 api_timeout（默认300秒）
+                        llm_timeout = getattr(self.config.llm, 'api_timeout', 300)
+                        response = future.result(timeout=llm_timeout)
+                    except FuturesTimeoutError:
+                        debug.error(f"LLM 调用超时 ({llm_timeout}秒)", tag="LLM")
+                        conversation_logger.log_error("llm_timeout", f"LLM 调用超时 ({llm_timeout}秒)")
+                        return True  # 继续下一次循环
+                    except Exception as e:
+                        # 捕获其他异常（如取消、网络错误等）
+                        debug.error(f"LLM 调用异常: {type(e).__name__}: {e}", tag="LLM")
+                        conversation_logger.log_error("llm_error", f"{type(e).__name__}: {e}")
+                        return True  # 继续下一次循环
+
                 messages.append(response)
 
                 # 记录 LLM 响应
@@ -1703,6 +1106,9 @@ class SelfEvolvingAgent:
                     response_content=response.content or "",
                     raw_response=response.content or ""
                 )
+
+                # 双写：Markdown 格式
+                transcript_logger.write_llm_response(response.content or "")
 
                 # Token 使用
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
@@ -1767,30 +1173,51 @@ class SelfEvolvingAgent:
 
                 # 无工具调用 = 结束
                 if not tool_calls:
-                    # 显示 AI 的意图/思考
+                    # 显示 AI 的完整回复
                     if response.content:
-                        content_preview = response.content[:100].replace('\n', ' ')
-                        debug.llm("最终回复", content_preview)
-                        conversation_logger.log_llm_intent("final_response", content_preview)
+                        debug.llm_response(response.content, "📤 LLM 最终回复")
+                        conversation_logger.log_llm_intent("final_response", response.content[:300])
                     return True
 
                 # 显示 AI 的意图/思考
                 if response.content:
-                    content_preview = response.content[:100].replace('\n', ' ')
-                    debug.llm("意图", content_preview)
-                    conversation_logger.log_llm_intent("tool_call", content_preview)
+                    debug.llm_thinking(response.content)
+                    conversation_logger.log_llm_intent("tool_call", response.content[:300])
 
                 # 执行工具
                 for tool_call in tool_calls:
                     tool_name = tool_call.get('name', 'unknown')
                     tool_args = tool_call.get('args', {})
 
-                    # 调试日志
-                    debug.tool(tool_name, "called", f"args={str(tool_args)[:50]}")
+                    # 显示工具调用开始
+                    debug.tool_start(tool_name, tool_args)
                     conversation_logger.log_tool_call(tool_name, tool_args, status="called")
+                    # 双写：Markdown 格式
+                    transcript_logger.write_tool_call(tool_name, tool_args, status="called")
 
                     # 执行工具（返回结果和特殊动作）
                     tool_result, action = self._execute_tool(tool_name, tool_args, messages)
+
+                    # 【调试】确保工具结果被正确记录
+                    if tool_result is None:
+                        debug.warning(f"[警告] {tool_name} 返回 None", tag="TOOL")
+
+                    # 显示工具执行结果（添加异常保护）
+                    success = action not in ["restart", "error"]
+                    try:
+                        if tool_result is not None:
+                            debug.tool_result(tool_name, str(tool_result), success)
+                            # 同时记录到对话日志
+                            conversation_logger.log_tool_call(tool_name, tool_args, str(tool_result), status="completed")
+                            # 双写：Markdown 格式
+                            transcript_logger.write_tool_call(tool_name, tool_args, str(tool_result), status="success")
+                        else:
+                            print(f"\n[TOOL] {tool_name}: None\n")
+                            conversation_logger.log_tool_call(tool_name, tool_args, "[无返回]", status="completed")
+                            # 双写：Markdown 格式
+                            transcript_logger.write_tool_call(tool_name, tool_args, "[无返回]", status="success")
+                    except Exception as e:
+                        print(f"\n[TOOL ERROR] {tool_name}: {str(e)[:100]}\n")
 
                     # 处理特殊动作
                     if action == "restart":
@@ -1798,20 +1225,22 @@ class SelfEvolvingAgent:
                         return False  # 触发重启
                     elif action == "skip":
                         conversation_logger.log_action("skip", {"tool": tool_name})
-                        messages.append(ToolMessage(content=self._format_tool_result(tool_name, tool_result), tool_call_id=tool_call['id']))
+                        messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call['id']))
                         conversation_logger.log_tool_call(tool_name, tool_args, tool_result, status="skipped")
                         continue  # 跳过添加结果
                     elif action == "hibernated":
                         conversation_logger.log_action("hibernated", {"tool": tool_name})
-                        messages.append(ToolMessage(content=self._format_tool_result(tool_name, tool_result), tool_call_id=tool_call['id']))
+                        messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call['id']))
                         return "hibernated"
 
                     # 将工具结果添加到消息中（所有非特殊动作的情况）
                     messages.append(ToolMessage(
-                        content=self._format_tool_result(tool_name, tool_result),
+                        content=tool_result,
                         tool_call_id=tool_call['id'],
                     ))
 
+            # 打印轮次结束信息
+            debug.turn_end(current_turn, tool_count=len(tool_calls) if tool_calls else 0)
             return True
 
         except Exception as e:
@@ -1871,8 +1300,15 @@ class SelfEvolvingAgent:
             saved = old_tokens - new_tokens
             return (f"上下文压缩完成: 节省{saved} Token ({old_tokens} -> {new_tokens}) [保留最近3条原始消息]", None)
 
-        # trigger_self_restart_tool: 世代归档 + 强制测试门控
+        # trigger_self_restart_tool: 世代归档 + 强制测试门控 + 任务清单拦截
         if tool_name == "trigger_self_restart_tool" and messages is not None:
+            # ========== 【新】任务清单拦截检查 ==========
+            is_blocked, block_msg = check_restart_block()
+            if is_blocked:
+                debug.warning("任务清单未完成，禁止重启", tag="TASK_BLOCK")
+                return (block_msg, None)
+            # ========== 任务清单拦截结束 ==========
+
             # ========== 强制测试门控：进化前必须通过测试 ==========
             if self._self_modified:
                 debug.system("检测到代码修改，正在运行测试门控...", tag="GATE")
@@ -1894,6 +1330,41 @@ class SelfEvolvingAgent:
                 debug.success(f"测试门控通过 ({test_result['passed_count']}/{test_result['total_count']})", tag="GATE")
             # ========== 测试门控结束 ==========
 
+            # 从消息历史中查找模型自己提交的 memory 更新
+            # 支持两种方式：1) 调用 commit_compressed_memory_tool 2) 在思考中声明
+            model_core_wisdom = None
+            model_next_goal = None
+            
+            import re
+            for msg in messages:
+                if not hasattr(msg, 'content') or not isinstance(msg.content, str):
+                    continue
+                    
+                tool_name = str(getattr(msg, 'name', ''))
+                
+                # 方式1: 检查工具调用的名称
+                if msg.type == "tool" and "commit_compressed_memory" in tool_name:
+                    try:
+                        import json as _json
+                        result = _json.loads(msg.content)
+                        if result.get("status") == "success":
+                            model_core_wisdom = result.get("core_wisdom", "") or result.get("new_core_context", "")
+                            model_next_goal = result.get("next_goal", "")
+                            debug.info(f"检测到模型提交的记忆: {model_core_wisdom[:50]}...", tag="MEMORY")
+                    except:
+                        pass
+                
+                # 方式2: 从 AI 思考内容中提取 commit 调用
+                if msg.type == "ai":
+                    content = msg.content
+                    # 查找 new_core_context 和 next_goal 的声明
+                    wisdom_match = re.search(r'new_core_context["\s:]+["\']([^"\']+)["\']', content)
+                    goal_match = re.search(r'next_goal["\s:]+["\']([^"\']+)["\']', content)
+                    if wisdom_match and not model_core_wisdom:
+                        model_core_wisdom = wisdom_match.group(1)[:300]
+                    if goal_match and not model_next_goal:
+                        model_next_goal = goal_match.group(1)[:200]
+            
             intermediate_steps = []
             for msg in messages:
                 if hasattr(msg, 'content') and isinstance(msg.content, str):
@@ -1903,24 +1374,29 @@ class SelfEvolvingAgent:
                         intermediate_steps.append({"type": "tool_call", "name": getattr(msg, 'name', 'unknown'), "content": msg.content[:200]})
             
             current_gen = get_generation()
-            core_wisdom = get_core_context() or "无"
-            current_goal = get_current_goal() or "待定"
+            # 优先使用模型自己提交的更新，否则使用 memory.json 中的旧值
+            core_wisdom = model_core_wisdom if model_core_wisdom else (get_core_context() or "无")
+            current_goal = model_next_goal if model_next_goal else (get_current_goal() or "待定")
             archive_result = archive_generation_history(generation=current_gen, history_data=intermediate_steps, core_wisdom=core_wisdom, next_goal=current_goal)
             new_gen = advance_generation()
             debug.info(f"归档完成: {archive_result}", tag="ARCHIVE")
             debug.success(f"G{current_gen} -> G{new_gen}", tag="GENERATION")
             
+            # 重启前准备：清除 DYNAMIC.md 中的任务区域（为下一世代留空）
+            from tools.memory_tools import clear_generation_task
+            clear_result = clear_generation_task()
+            debug.info(f"准备下一世代: {clear_result}", tag="DYNAMIC")
+            
             tool_result = trigger_self_restart(**tool_args)
             tool_result_with_archive = f"{tool_result}\n[世代归档] G{current_gen} -> G{new_gen}"
-            
-            if "✓" in tool_result or "成功" in tool_result:
-                if self._self_modified:
-                    debug.success("代码已修改，重启生效", tag="RESTART")
-                    return (tool_result_with_archive, "restart")
-                else:
-                    debug.info("重启跳过（无代码修改）", tag="RESTART")
-                    self._self_modified = False
-            return (tool_result_with_archive, "skip")
+
+            # 有错误时阻止重启
+            if error_type and not self._self_modified:
+                return (f"{tool_result_with_archive}\n\n[BLOCKED] 重启被阻止：{error_type}", "skip")
+
+            debug.success("重启生效" if self._self_modified else "重启以保存记忆", tag="RESTART")
+            self._self_modified = False
+            return (tool_result_with_archive, "restart")
 
         # enter_hibernation_tool: 休眠处理
         if tool_name == "enter_hibernation_tool":
@@ -1938,47 +1414,70 @@ class SelfEvolvingAgent:
             "check_syntax_tool": 10, "list_symbols_in_file_tool": 5, "list_directory_tool": 10,
             "read_local_file_tool": 10, "edit_local_file_tool": 15, "create_new_file_tool": 15,
             "trigger_self_restart_tool": 30, "read_memory_tool": 5, "commit_compressed_memory_tool": 10,
+            "read_dynamic_prompt_tool": 5, "set_generation_task_tool": 10, "add_insight_tool": 10,
             "read_generation_archive_tool": 10, "list_generation_archives_tool": 5,
             "compress_context_tool": 30, "grep_search_tool": 30, "apply_diff_edit_tool": 15,
             "validate_diff_format_tool": 5, "find_function_calls_tool": 30, "find_definitions_tool": 30,
             "get_code_entity_tool": 15, "list_file_entities_tool": 10, "search_and_read_tool": 30,
             "delete_file_tool": 10, "cleanup_test_files_tool": 30,
+            # 任务清单工具
+            "set_plan_tool": 10, "tick_subtask_tool": 5, "modify_task_tool": 5,
+            "add_task_tool": 5, "remove_task_tool": 5, "get_task_status_tool": 5,
         }
         DEFAULT_TIMEOUT = 30
 
         tool_func_map = {
+            # 网络工具
             "web_search_tool": lambda: web_search(**tool_args),
             "read_webpage_tool": lambda: read_webpage(**tool_args),
+            # 文件操作
             "list_directory_tool": lambda: list_dir(**tool_args),
             "read_local_file_tool": lambda: read_file(**tool_args),
             "edit_local_file_tool": lambda: edit_local_file(**tool_args),
             "create_new_file_tool": lambda: create_new_file(**tool_args),
+            "delete_file_tool": lambda: delete_file(**tool_args),
+            # 代码工具
             "check_syntax_tool": lambda: check_syntax(**tool_args),
             "list_symbols_in_file_tool": lambda: list_symbols_in_file(**tool_args),
             "backup_project_tool": lambda: backup_project(**tool_args),
+            "cleanup_test_files_tool": lambda: cleanup_test_files(**tool_args),
+            # Agent 状态
             "run_self_test_tool": lambda: run_self_test(),
             "get_agent_status_tool": lambda: get_agent_status(),
-            "enter_hibernation_tool": lambda: enter_hibernation_tool(**tool_args),
+            # 进化历史
             "get_evolution_history_tool": lambda: get_evolution_history(**tool_args),
             "get_evolution_stats_tool": lambda: get_evolution_stats(),
             "trigger_self_restart_tool": lambda: trigger_self_restart(**tool_args),
+            # 记忆工具
             "read_memory_tool": lambda: read_memory(**tool_args),
             "commit_compressed_memory_tool": lambda: commit_compressed_memory(**tool_args),
+            "read_dynamic_prompt_tool": lambda: read_dynamic_prompt(**tool_args),
+            "set_generation_task_tool": lambda: update_generation_task(**tool_args),
+            "add_insight_tool": lambda: add_insight_to_dynamic(**tool_args),
             "read_generation_archive_tool": lambda: read_generation_archive(**tool_args),
             "list_generation_archives_tool": lambda: list_archives(**tool_args),
+            # CLI 工具
             "run_cmd_tool": lambda: run_cmd(**tool_args),
             "run_powershell_tool": lambda: run_powershell(**tool_args),
             "run_batch_tool": lambda: run_batch(**tool_args),
+            "execute_cli_command": lambda: self._execute_cli(**tool_args),
+            # 搜索工具
             "grep_search_tool": lambda: grep_search(**tool_args),
             "apply_diff_edit_tool": lambda: apply_diff_edit(**tool_args),
             "validate_diff_format_tool": lambda: validate_diff_format(**tool_args),
             "find_function_calls_tool": lambda: find_function_calls(**tool_args),
             "find_definitions_tool": lambda: find_definitions(**tool_args),
+            # AST 工具
             "get_code_entity_tool": lambda: get_code_entity(**tool_args),
             "list_file_entities_tool": lambda: list_file_entities(**tool_args),
             "search_and_read_tool": lambda: search_and_read(**tool_args),
-            "delete_file_tool": lambda: delete_file(**tool_args),
-            "cleanup_test_files_tool": lambda: cleanup_test_files(**tool_args),
+            # ========== 任务清单工具 ==========
+            "set_plan_tool": lambda: set_plan_tool(**tool_args),
+            "tick_subtask_tool": lambda: tick_subtask_tool(**tool_args),
+            "modify_task_tool": lambda: modify_task_tool(**tool_args),
+            "add_task_tool": lambda: add_task_tool(**tool_args),
+            "remove_task_tool": lambda: remove_task_tool(**tool_args),
+            "get_task_status_tool": lambda: get_task_status(),
         }
 
         if tool_name not in tool_func_map:
@@ -2063,6 +1562,14 @@ class SelfEvolvingAgent:
         else:
             bc.log_tool_call(tool_name, "成功")
 
+            # 【新增】CLI 命令错误检测：阻止假阳性导致盲目重启
+            # 如果 execute_cli_command 返回失败标记，添加错误类型标记
+            if tool_name in ("execute_cli_command", "run_cmd_tool", "run_powershell_tool", "run_batch_tool"):
+                if result and "[EXEC FAILURE" in result:
+                    # 真正的失败：标记为错误，防止 Agent 误以为成功
+                    error_type = "ExecFailure"
+                    bc.log_error(f"CLI 命令执行失败: {result[:100]}")
+
         # 标记自修改
         if error_type is None and tool_name in ("edit_local_file_tool", "create_new_file_tool"):
             file_path = tool_args.get("file_path", "")
@@ -2072,7 +1579,11 @@ class SelfEvolvingAgent:
                 bc.log("agent.py 已修改，准备重启应用更改", "MODIFY")
 
         return (result, action)
-    
+
+    def _execute_cli(self, command: str, timeout: int = 60) -> str:
+        """执行 CLI 命令"""
+        return execute_cli_command(command, timeout=timeout)
+
     def run_loop(self, initial_prompt: str = None) -> None:
         """
         运行 Agent 主循环。
@@ -2104,8 +1615,21 @@ class SelfEvolvingAgent:
             "awake_interval": self.config.agent.awake_interval,
         })
 
+        # 初始化优雅对话渲染器（Markdown 格式）
+        generation = get_generation()
+        transcript_logger.start_generation(generation)
+        transcript_logger.write_action("会话开始", f"世代: G{generation}, 模型: {self.model_name}")
+
+        # 重置 System Prompt 写入标记
+        self._system_prompt_written = False
+
+        # 自动清理旧的 transcript 文件（保留最近 5 个）
+        transcript_logger.cleanup_old_transcripts(keep_recent=5)
+
+        # 标记是否已写入 System Prompt（避免重复写入）
+        _system_prompt_written_for_session = False
+
         last_backup_time = time.time()
-        is_first_iteration = initial_prompt is not None
 
         try:
             debug.kv("记忆状态", f"G{get_generation()} | {get_current_goal()[:50]}")
@@ -2120,30 +1644,10 @@ class SelfEvolvingAgent:
                 bc.update_status(AgentStatus.THINKING, action="处理用户任务...")
             else:
                 debug.system(f"自主进化模式，awake_interval={self.config.agent.awake_interval}s", tag="AUTO")
-                bc.update_status(AgentStatus.PLANNING, action="生成自主任务...")
+                bc.update_status(AgentStatus.PLANNING, action="模型自主决策中...")
 
-                # 无外部输入时，先自动生成任务
-                from tools.autonomous_task_generator import get_autonomous_task_sync
-                auto_task = get_autonomous_task_sync()
-                try:
-                    import json
-                    task_data = json.loads(auto_task)
-                    if task_data.get("status") == "success":
-                        task = task_data.get("task", {})
-                        user_input = f"""【自主任务 G{task_data.get('generation', '?')}】
-类型：{task.get('type', 'unknown')}
-目标：{task.get('title', '未知目标')}
-描述：{task.get('description', '无描述')}
-建议行动：{task.get('suggested_action', '请自行分析并行动')}
-"""
-                        debug.system(f"已生成自主任务: {task.get('title', '未知')}", tag="TASK")
-                        bc.update_status(
-                            AgentStatus.PLANNING,
-                            action=f"生成任务: {task.get('title', '未知')[:30]}...",
-                            current_goal=task.get('title', ''),
-                        )
-                except:
-                    user_input = "作为自我进化 Agent，请分析当前代码库状态，主动寻找可以改进的地方并执行。"
+                # 模型自主决策：直接进入 think_and_act，让模型根据 SOUL.md 的使命自主决定任务
+                user_input = "【自主进化】你是完全自主的进化体，请根据 SOUL.md 的使命指示，结合当前代码库状态，自主决定对你最有利的任务。分析自己制定的任务并执行。"
 
             iteration_count = 0
             total_tools_executed = 0
@@ -2180,32 +1684,12 @@ class SelfEvolvingAgent:
                     debug.debug("Agent 已主动休眠完毕，继续执行", tag="WAKE")
                     continue
 
-                # 正常执行完成，自动生成下一个自主任务
-                debug.system("执行完成，生成下一个自主任务...", tag="EVOLVE")
-                bc.update_status(AgentStatus.PLANNING, action="生成下一个自主任务...")
+                # 正常执行完成，模型自主决策下一个行动
+                debug.system("执行完成，模型自主决策下一轮进化...", tag="EVOLVE")
+                bc.update_status(AgentStatus.PLANNING, action="模型自主决策中...")
 
-                from tools.autonomous_task_generator import get_autonomous_task_sync
-                auto_task = get_autonomous_task_sync()
-                try:
-                    import json
-                    task_data = json.loads(auto_task)
-                    if task_data.get("status") == "success":
-                        task = task_data.get("task", {})
-                        user_input = f"""【自主任务 G{task_data.get('generation', '?')}】
-类型：{task.get('type', 'unknown')}
-目标：{task.get('title', '未知目标')}
-描述：{task.get('description', '无描述')}
-建议行动：{task.get('suggested_action', '请自行分析并行动')}
-"""
-                        debug.system(f"新任务: {task.get('title', '未知')} (优先级: {task.get('priority', '?')})", tag="TASK")
-                        bc.update_status(
-                            AgentStatus.PLANNING,
-                            action=f"新任务: {task.get('title', '未知')[:30]}",
-                            current_goal=task.get('title', ''),
-                        )
-                except:
-                    user_input = "作为自我进化 Agent，请继续分析代码库，寻找下一个改进机会。"
-                    debug.warning("任务解析失败，使用通用任务", tag="ERROR")
+                # 模型自主决策
+                user_input = "【自主进化】任务完成。请分析本轮执行结果和当前代码库状态，自主决定下一个最有价值的行动。持续进化！"
 
                 # 短暂休眠避免过快循环
                 time.sleep(2)
@@ -2225,6 +1709,8 @@ class SelfEvolvingAgent:
             bc.log(f"主循环结束 | 运行时长: {uptime}", "SHUTDOWN")
             bc.update_status(AgentStatus.IDLE, action="系统已关闭")
             conversation_logger.end_session({"uptime_seconds": uptime.total_seconds()})
+            # 双写：Markdown 格式 - 结束世代记录
+            transcript_logger.end_generation(f"运行时长: {uptime}")
             bc.close()
 
 
@@ -2280,6 +1766,11 @@ def parse_args():
         default=None,
         help='初始任务提示'
     )
+    parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='自动模式（无交互）'
+    )
     return parser.parse_args()
 
 
@@ -2306,6 +1797,19 @@ def main(initial_prompt: str = None):
     Args:
         initial_prompt: 首次运行时的任务提示（可选）
     """
+    # 初始化 Rich UI
+    ui = get_ui()
+
+    # 打印启动横幅
+    ui.console.clear()
+    ui.console.print()
+    ui.console.print("[bold cyan]╔══════════════════════════════════════════════════════════╗[/bold cyan]")
+    ui.console.print("[bold cyan]║                                                          ║[/bold cyan]")
+    ui.console.print("[bold cyan]║[bold white]Self-Evolving Agent[/bold white] - Terminal Edition ║[/bold cyan]")
+    ui.console.print("[bold cyan]║                                                          ║[/bold cyan]")
+    ui.console.print("[bold cyan]╚══════════════════════════════════════════════════════════╝[/bold cyan]")
+    ui.console.print()
+
     args = parse_args()
 
     config = Config(
@@ -2321,25 +1825,78 @@ def main(initial_prompt: str = None):
 
     setup_logging(level=config.log.level)
 
-    debug.section(f"启动 {config.agent.name}")
-    debug.kv("模型", config.llm.model_name)
-    debug.kv("唤醒间隔", f"{config.agent.awake_interval}s")
-    debug.kv("自动备份", str(config.agent.auto_backup))
+    # 使用 Rich 表格显示配置
+    ui.console.print(f"[bold]启动 {config.agent.name}[/bold]")
+    ui.console.print(f"  [cyan]Model:[/cyan]   {config.llm.model_name}")
+    ui.console.print(f"  [cyan]Awake:[/cyan]   {config.agent.awake_interval}s")
+    ui.console.print(f"  [cyan]Backup:[/cyan]   {config.agent.auto_backup}")
+    ui.console.print()
 
     try:
         api_key = config.get_api_key()
         if not api_key:
-            debug.error("API Key 未设置!", tag="CONFIG")
+            ui_error("API Key 未设置!", None)
             sys.exit(1)
 
         agent = SelfEvolvingAgent(config=config)
-        debug.kv("加载工具", f"{len(agent.tools)} 个")
-        debug.divider()
+        ui.console.print(f"  [green]Tools:[/green]   {len(agent.tools)} loaded")
+        ui.console.print("[dim]─" * 60 + "[/dim]")
+        ui.console.print()
 
-        agent.run_loop(initial_prompt=initial_prompt)
+        # 如果是自动模式，直接启动
+        if args.auto or initial_prompt:
+            agent.run_loop(initial_prompt=initial_prompt)
+        else:
+            # 交互模式：显示漂亮的提示符
+            ui.console.print("[bold yellow]交互模式[/bold yellow] - 输入指令或按 Enter 进入自动模式")
+            ui.console.print("[dim]提示: 输入 /help 查看命令，/auto 进入自动模式，/quit 退出[/dim]")
+            ui.console.print()
+
+            while True:
+                try:
+                    user_input = input("[bold cyan]Agent[/bold cyan] > ").strip()
+
+                    if not user_input:
+                        # Enter 键进入自动模式
+                        ui.console.print("[dim]进入自动模式...[/dim]")
+                        agent.run_loop()
+                        break
+
+                    elif user_input.lower() in ['/quit', '/exit', '/q']:
+                        ui.console.print("[yellow]再见![/yellow]")
+                        break
+
+                    elif user_input.lower() in ['/auto', '/a']:
+                        ui.console.print("[dim]进入自动模式...[/dim]")
+                        agent.run_loop()
+                        break
+
+                    elif user_input.lower() in ['/help', '/h', '/?']:
+                        ui.console.print("""
+[bold cyan]可用命令:[/bold cyan]
+  /auto, /a     - 进入自动模式
+  /quit, /q     - 退出程序
+  /help, /h     - 显示此帮助
+  <任意文本>     - 将文本作为任务发送给 Agent
+""")
+                        continue
+
+                    else:
+                        # 作为任务运行
+                        agent.run_loop(initial_prompt=user_input)
+                        ui.console.print()
+                        ui.console.print("[dim]─" * 60 + "[/dim]")
+                        ui.console.print("[yellow]返回交互模式[/yellow]")
+                        ui.console.print()
+
+                except KeyboardInterrupt:
+                    ui.console.print("\n[yellow]中断，退出...[/yellow]")
+                    break
+                except EOFError:
+                    break
 
     except Exception as e:
-        debug.error(f"启动异常: {type(e).__name__}: {e}", exc_info=True)
+        ui_error(f"启动异常: {type(e).__name__}: {e}", traceback.format_exc())
         sys.exit(1)
 
 
