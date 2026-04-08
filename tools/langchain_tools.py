@@ -7,7 +7,7 @@ LangChain 工具包装模块
 
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 # 添加项目根目录到 Python 路径（如果尚未添加）
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,7 +88,7 @@ def create_langchain_tools() -> List[BaseTool]:
         return read_webpage(url)
 
     @tool
-    def read_local_file_tool(file_path: str, max_lines: int = None, offset: int = 0) -> str:
+    def read_local_file_tool(file_path: str, max_lines: Optional[int] = None, offset: int = 0) -> str:
         """
         读取本地文件内容。
 
@@ -531,7 +531,7 @@ def create_langchain_tools() -> List[BaseTool]:
         return find_definitions(symbol_name, search_dir, include_ext)
 
     @tool
-    def list_file_entities_tool(file_path: str, entity_type: str = None) -> str:
+    def list_file_entities_tool(file_path: str, entity_type: str = "all") -> str:
         """
         【AST 透视】列出 Python 文件的所有类和函数骨架。
 
@@ -546,6 +546,7 @@ def create_langchain_tools() -> List[BaseTool]:
 
         Args:
             file_path: Python 文件路径
+            entity_type: 过滤类型 ('class', 'function', 'all')
 
         Returns:
             格式化的实体列表，包含名称、类型、位置

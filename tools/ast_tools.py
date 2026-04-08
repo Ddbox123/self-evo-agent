@@ -252,13 +252,13 @@ def _search_entity_by_text(lines: List[str], entity_name: str, file_path: str) -
     )
 
 
-def list_file_entities(file_path: str, entity_type: str = None) -> str:
+def list_file_entities(file_path: str, entity_type: str = "all") -> str:
     """
     列出文件中的所有实体
 
     Args:
         file_path: Python 文件路径
-        entity_type: 过滤类型 ('class', 'function', None 表示全部)
+        entity_type: 过滤类型 ('class', 'function', 'all')
 
     Returns:
         实体列表
@@ -274,10 +274,15 @@ def list_file_entities(file_path: str, entity_type: str = None) -> str:
     ]
 
     all_entities = []
-    if entity_type is None or entity_type == 'class':
+    if entity_type == "all" or entity_type is None:
         for cls in entities['class']:
             all_entities.append(('class', cls))
-    if entity_type is None or entity_type == 'function':
+        for func in entities['function'] + entities['async_function']:
+            all_entities.append(('function', func))
+    elif entity_type == 'class':
+        for cls in entities['class']:
+            all_entities.append(('class', cls))
+    elif entity_type == 'function':
         for func in entities['function'] + entities['async_function']:
             all_entities.append(('function', func))
 
