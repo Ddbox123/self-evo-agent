@@ -27,7 +27,7 @@ def test_1_cli_error_detection():
     print("测试1: CLI 命令错误检测")
     print("=" * 60)
 
-    from tools.cli_tools import execute_cli_command
+    from tools.shell_tools import execute_shell_command
 
     # 测试失败的命令
     result = execute_cli_command("python -c 'raise ValueError(\"test error\")'")

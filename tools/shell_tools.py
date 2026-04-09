@@ -1,24 +1,49 @@
 # -*- coding: utf-8 -*-
 """
-CMD 命令行执行 + 文件操作工具模块
+Shell 工具模块 - 统一的命令行和文件操作工具
 
-提供在 Windows 环境下执行 CMD/PowerShell 命令的功能，以及文件读取操作。
+整合自 cli_tools.py 和 cmd_tools.py，提供：
+1. 命令执行：CLI 命令、PowerShell、批量命令
+2. 文件操作：读取、创建、编辑、列表
+3. 代码检查：语法检查、符号提取
+4. 项目管理：备份、清理、状态查询
 
-核心功能：
-1. 执行系统命令
-2. 读取文件内容
-3. 代码编辑
-4. 语法检查
-5. 项目备份
+## 核心能力
+
+- **万物皆可执行**: ls, cat, grep, python, pytest, pip, git 等
+- **智能输出合并**: 同时捕获 stdout 和 stderr，统一返回
+- **超时保护**: 防止死循环命令导致主进程假死
+- **安全护栏**: 拦截危险命令
+- **路径安全**: 限制在允许目录范围内操作
+
+## 使用示例
+
+```python
+# 执行命令
+execute_shell_command("ls -la")
+
+# 读取文件
+read_file("agent.py")
+
+# 编辑文件
+edit_file("agent.py", "old_code", "new_code")
+
+# 语法检查
+check_python_syntax("agent.py")
+```
 """
 
 import logging
 import subprocess
 import os
 import shutil
+import ast
+import traceback
 from pathlib import Path
 from typing import Optional, List
-
+from datetime import datetime
+import locale
+import platform
 
 # ============================================================================
 # 配置常量
@@ -26,78 +51,35 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
-DANGEROUS_COMMANDS = [
-    'format',
-    'del /f /s /q',
-    'rmdir /s /q',
-    'rm -rf',
-    'dd if=',
-    ':(){:|:&};:',
-    'shutdown',
-    'sysprep',
-    'cipher /w:',
+# 项目根目录
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+
+# 危险命令黑名单（合并两个文件的并集）
+DANGEROUS_PATTERNS = [
+    # 磁盘操作危险命令
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=/dev/zero of=/dev/sda",
+    "> /dev/sda",
+    # Windows 危险命令
+    "format",
+    "del /f /s /q",
+    "rmdir /s /q",
+    "rm -rf",
+    "cipher /w:",
+    # 系统危险命令
+    "shutdown",
+    "sysprep",
+    ":(){ :|:& };:",  # Fork bomb
 ]
 
+# 默认配置
 DEFAULT_TIMEOUT = 60
 MAX_OUTPUT_LENGTH = 10000
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
-
-# ============================================================================
-# 辅助函数
-# ============================================================================
-
-def _is_command_safe(command: str) -> tuple:
-    command_lower = command.lower()
-    for dangerous in DANGEROUS_COMMANDS:
-        if dangerous.lower() in command_lower:
-            return False, f"危险命令: 包含 '{dangerous}'"
-    return True, "安全"
-
-
-# ============================================================================
-# CMD 执行（委托给 CLI 引擎）
-# ============================================================================
-
-# 导入 CLI 引擎
-
-
-def run_cmd(command: str, timeout: int = DEFAULT_TIMEOUT, shell: bool = True,
-            cwd: Optional[str] = None, check_safety: bool = True) -> str:
-    """执行 CMD 命令（委托给 CLI 引擎）"""
-    if not command or not isinstance(command, str):
-        return "[CMD] 错误: 命令不能为空"
-
-    command = command.strip()
-    if not command:
-        return "[CMD] 错误: 命令不能为空"
-
-    if check_safety:
-        is_safe, reason = _is_command_safe(command)
-        if not is_safe:
-            return f"[CMD] 安全检查] {reason}\n命令已拒绝执行"
-
-    # 委托给 CLI 引擎
-    return _cli_execute(command, timeout=timeout, cwd=cwd)
-
-
-def run_powershell(command: str, timeout: int = DEFAULT_TIMEOUT, cwd: Optional[str] = None) -> str:
-    """通过 PowerShell 执行命令"""
-    ps_command = f'powershell -NoProfile -ExecutionPolicy Bypass -Command "{command}"'
-    return run_cmd(ps_command, timeout=timeout, cwd=cwd, check_safety=True)
-
-
-def run_batch(commands: List[str], timeout: int = DEFAULT_TIMEOUT, cwd: Optional[str] = None) -> str:
-    """批量执行多个 CMD 命令"""
-    if not commands:
-        return "[CMD] 错误: 命令列表为空"
-    combined_command = " && ".join(commands)
-    return run_cmd(combined_command, timeout=timeout, cwd=cwd)
-
-
-# ============================================================================
-# 文件操作
-# ============================================================================
-
+# 路径安全配置
 ALLOWED_ROOT_DIRS = [
     os.path.dirname(os.path.abspath(__file__)),
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -105,14 +87,41 @@ ALLOWED_ROOT_DIRS = [
     os.path.expanduser("~"),
 ]
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
-
+# 禁止访问的文件模式
 FORBIDDEN_PATTERNS = [
     '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
 ]
 
+# 允许编辑的文件扩展名
+EDITABLE_EXTENSIONS = {
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.kt', '.go', '.rs',
+    '.c', '.cpp', '.h', '.hpp', '.rb', '.php', '.html', '.css', '.scss',
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.md', '.txt',
+    '.sh', '.sql', '.xml', '.svg'
+}
+
+# 禁止删除的文件/目录模式
+FORBIDDEN_DELETE_PATTERNS = [
+    '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
+    'config.py', 'config.toml', '.git', 'restarter.py', 'agent.py',
+    '__pycache__', '.pytest_cache', '.gitignore',
+]
+
+# ============================================================================
+# 安全检查函数
+# ============================================================================
+
+def _is_command_dangerous(command: str) -> tuple[bool, str]:
+    """检查命令是否危险"""
+    cmd_lower = command.lower().strip()
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.lower() in cmd_lower:
+            return True, f"危险命令拦截: {pattern}"
+    return False, ""
+
 
 def _is_path_allowed(file_path: str) -> bool:
+    """检查路径是否在允许范围内"""
     abs_path = os.path.abspath(file_path)
     for allowed_dir in ALLOWED_ROOT_DIRS:
         allowed_abs = os.path.abspath(allowed_dir)
@@ -122,6 +131,7 @@ def _is_path_allowed(file_path: str) -> bool:
 
 
 def _is_path_safe(file_path: str) -> bool:
+    """检查路径是否包含敏感文件"""
     abs_path = os.path.abspath(file_path).lower()
     for pattern in FORBIDDEN_PATTERNS:
         if pattern.lower() in abs_path:
@@ -130,6 +140,7 @@ def _is_path_safe(file_path: str) -> bool:
 
 
 def _detect_encoding(file_path: Path) -> str:
+    """自动检测文件编码"""
     encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1', 'cp1252']
     for enc in encodings:
         try:
@@ -142,6 +153,7 @@ def _detect_encoding(file_path: Path) -> str:
 
 
 def _is_binary_content(content: str, threshold: float = 0.30) -> bool:
+    """判断内容是否为二进制"""
     if not content:
         return False
     printable_ascii = set(range(32, 127)) | {9, 10, 13}
@@ -165,9 +177,201 @@ def _is_binary_content(content: str, threshold: float = 0.30) -> bool:
     return non_text_chars / max(total_chars, 1) > threshold
 
 
-def read_file(file_path: str, encoding: Optional[str] = None,
-              max_lines: Optional[int] = None, show_line_numbers: bool = True,
-              offset: int = 0) -> str:
+# ============================================================================
+# 命令执行函数
+# ============================================================================
+
+def execute_shell_command(
+    command: str,
+    timeout: int = 60,
+    cwd: Optional[str] = None,
+    check_safety: bool = True
+) -> str:
+    """
+    执行 Shell 命令的万能工具
+
+    Args:
+        command: 要执行的 Shell 命令
+        timeout: 超时时间（秒），默认 60 秒
+        cwd: 工作目录，默认为项目根目录
+        check_safety: 是否进行安全检查，默认 True
+
+    Returns:
+        str: 合并后的命令输出（stdout + stderr）
+    """
+    # 安全检查
+    if check_safety:
+        is_dangerous, msg = _is_command_dangerous(command)
+        if is_dangerous:
+            return f"[安全拦截] {msg}\n该命令被系统安全策略阻止。"
+
+    # 设置工作目录
+    if cwd is None:
+        cwd = str(PROJECT_ROOT)
+
+    # 确保工作目录存在
+    if not os.path.exists(cwd):
+        return f"[错误] 工作目录不存在: {cwd}"
+
+    try:
+        # 获取系统编码
+        system_encoding = locale.getpreferredencoding(False) or 'utf-8'
+
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding=system_encoding,
+            errors='replace',
+            timeout=timeout
+        )
+
+        # 合并 stdout 和 stderr
+        output_parts = []
+
+        if result.stdout:
+            output_parts.append(result.stdout.strip())
+
+        if result.stderr:
+            output_parts.append(f"[STDERR]\n{result.stderr.strip()}")
+
+        if not output_parts:
+            output_parts.append("[命令执行完成，无输出]")
+
+        output = "\n\n".join(output_parts)
+
+        # 如果命令返回非零状态码，必须明确标记
+        if result.returncode != 0:
+            has_error_keywords = any(kw in output.lower() for kw in
+                ["error", "exception", "failed", "fail", "traceback", "syntaxerror", "indentationerror"])
+            if has_error_keywords:
+                return f"[EXEC FAILURE | Exit Code: {result.returncode}]\n{output}"
+            else:
+                return f"[WARNING | Exit Code: {result.returncode}]\n{output}"
+
+        return output
+
+    except subprocess.TimeoutExpired:
+        return f"[超时] 命令执行超过 {timeout} 秒被强制终止。\n请检查命令是否陷入死循环。"
+
+    except FileNotFoundError:
+        return f"[错误] 命令未找到: {command}\n请检查命令是否正确，或使用完整路径。"
+
+    except PermissionError:
+        return f"[权限错误] 无法执行命令: {command}\n可能需要管理员权限。"
+
+    except Exception as e:
+        return f"[执行错误] {type(e).__name__}: {str(e)}"
+
+
+# 向后兼容别名
+execute_cli_command = execute_shell_command
+run_cmd = execute_shell_command
+
+
+def run_powershell(command: str, timeout: int = DEFAULT_TIMEOUT, cwd: Optional[str] = None) -> str:
+    """通过 PowerShell 执行命令"""
+    ps_command = f'powershell -NoProfile -ExecutionPolicy Bypass -Command "{command}"'
+    return execute_shell_command(ps_command, timeout=timeout, cwd=cwd, check_safety=True)
+
+
+def run_batch(commands: List[str], timeout: int = DEFAULT_TIMEOUT, cwd: Optional[str] = None) -> str:
+    """批量执行多个命令"""
+    if not commands:
+        return "[错误] 命令列表为空"
+    combined_command = " && ".join(commands)
+    return execute_shell_command(combined_command, timeout=timeout, cwd=cwd)
+
+
+def quick_ping(host: str = "8.8.8.8", count: int = 1) -> str:
+    """快速网络连通性检测"""
+    system = platform.system().lower()
+    if system == "windows":
+        cmd = f"ping -n {count} {host}"
+    else:
+        cmd = f"ping -c {count} {host}"
+    return execute_shell_command(cmd, timeout=10)
+
+
+# ============================================================================
+# Python 代码检查
+# ============================================================================
+
+def check_python_syntax(file_path: str) -> str:
+    """
+    检查 Python 文件的语法正确性（使用 AST 解析，更精确）
+
+    Args:
+        file_path: Python 文件路径
+
+    Returns:
+        检查结果
+    """
+    if not file_path:
+        return "[语法检查] 错误: 文件路径不能为空"
+
+    file_path = file_path.strip()
+
+    try:
+        abs_path = Path(file_path).resolve()
+    except Exception as e:
+        return f"[语法检查] 错误: 无效的路径 - {e}"
+
+    if not abs_path.exists():
+        return f"[语法检查] 错误: 文件不存在 - {abs_path}"
+
+    if abs_path.suffix.lower() != '.py':
+        return f"[语法检查] 错误: 仅支持 .py 文件 - {abs_path}"
+
+    try:
+        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+            source = f.read()
+
+        ast.parse(source, filename=str(abs_path))
+        return "Syntax OK"
+
+    except SyntaxError as e:
+        lines = [
+            "=" * 60,
+            "[语法检查] 发现语法错误",
+            "=" * 60,
+            f"文件: {abs_path}",
+            f"行号: {e.lineno}",
+            f"错误: {e.msg if hasattr(e, 'msg') else str(e)}",
+            "",
+            traceback.format_exception(type(e).__name__, e, e.__traceback__)[-1],
+            "=" * 60,
+            "建议修复后重新调用 check_python_syntax",
+            "=" * 60,
+        ]
+        return '\n'.join(lines)
+
+    except Exception as e:
+        return f"[语法检查] 错误: {str(e)}"
+
+
+def run_pytest(test_path: str = "tests/", verbose: bool = True, timeout: int = 120) -> str:
+    """运行 pytest 测试"""
+    v_flag = "-v" if verbose else ""
+    return execute_shell_command(
+        f"pytest {test_path} {v_flag}",
+        timeout=timeout
+    )
+
+
+# ============================================================================
+# 文件读取操作
+# ============================================================================
+
+def read_file(
+    file_path: str,
+    encoding: Optional[str] = None,
+    max_lines: Optional[int] = None,
+    show_line_numbers: bool = True,
+    offset: int = 0
+) -> str:
     """
     读取本地文件内容
 
@@ -176,47 +380,49 @@ def read_file(file_path: str, encoding: Optional[str] = None,
         encoding: 编码格式，默认自动检测
         max_lines: 最大读取行数，None 表示读取全部
         show_line_numbers: 是否显示行号
-        offset: 从第几行开始读取（0-based），用于跳过大段代码
+        offset: 从第几行开始读取（0-based）
+
+    Returns:
+        文件内容
     """
     if not file_path or not isinstance(file_path, str):
         return "[文件读取] 错误: 路径不能为空"
-    
+
     file_path = file_path.strip()
     if not file_path:
         return "[文件读取] 错误: 路径不能为空"
-    
+
     try:
         abs_path = Path(file_path).resolve()
     except Exception as e:
         return f"[文件读取] 错误: 无效的路径格式 - {file_path}"
-    
+
     if not _is_path_allowed(str(abs_path)):
         return f"[文件读取] 错误: 路径超出允许范围 - {abs_path}"
-    
+
     if not _is_path_safe(str(abs_path)):
         return f"[文件读取] 错误: 禁止读取敏感文件 - {abs_path.name}"
-    
+
     if not abs_path.exists():
         return f"[文件读取] 错误: 文件不存在 - {abs_path}"
-    
+
     if not abs_path.is_file():
         return f"[文件读取] 错误: 路径不是文件 - {abs_path}"
-    
+
     try:
         stat = abs_path.stat()
         file_size = stat.st_size
-        
+
         if file_size > MAX_FILE_SIZE:
             size_mb = file_size / (1024 * 1024)
             max_mb = MAX_FILE_SIZE / (1024 * 1024)
             return f"[文件读取] 错误: 文件过大 ({size_mb:.1f} MB > {max_mb:.0f} MB)"
-        
+
         if encoding is None:
             encoding = _detect_encoding(abs_path)
-        
+
         with open(abs_path, 'r', encoding=encoding, errors='replace') as f:
             if offset > 0:
-                # 跳过前面的行
                 for _ in range(offset):
                     f.readline()
 
@@ -235,29 +441,29 @@ def read_file(file_path: str, encoding: Optional[str] = None,
                 content = f.read()
                 total_lines = offset + content.count('\n') + 1
                 truncated = False
-        
+
         if _is_binary_content(content):
             return f"[文件读取] 错误: 二进制文件不支持 - {abs_path}"
-        
+
         file_size_str = f"{file_size / 1024:.1f} KB" if file_size < 1024 * 1024 else f"{file_size / (1024 * 1024):.1f} MB"
-        
+
         result_lines = [
             f"[文件] {abs_path}",
             f"[编码] {encoding} | [行数] {total_lines}" + (" (已截断)" if truncated else "") + f" | [大小] {file_size_str}",
             "",
             "--- Content ---",
         ]
-        
+
         if show_line_numbers:
             for i, line in enumerate(content.split('\n'), offset + 1):
                 result_lines.append(f"第 {i:>5} 行 | {line}")
         else:
             result_lines.append(content)
-        
+
         result_lines.append("--- End ---")
-        
+
         return '\n'.join(result_lines)
-    
+
     except PermissionError:
         return f"[文件读取] 错误: 权限不足 - {abs_path}"
     except UnicodeDecodeError as e:
@@ -266,33 +472,45 @@ def read_file(file_path: str, encoding: Optional[str] = None,
         return f"[文件读取] 错误: {str(e)}"
 
 
-def list_dir(path: str = ".", show_hidden: bool = False, recursive: bool = False) -> str:
+# 向后兼容别名
+read_local_file = read_file
+
+
+# ============================================================================
+# 目录列表操作
+# ============================================================================
+
+def list_directory(
+    path: str = ".",
+    show_hidden: bool = False,
+    recursive: bool = False
+) -> str:
     """列出目录内容"""
     if not path or not isinstance(path, str):
         return "[目录列表] 错误: 目录路径不能为空"
-    
+
     path = path.strip()
     if not path:
         path = "."
-    
+
     try:
         abs_path = Path(path).resolve()
     except Exception as e:
         return f"[目录列表] 错误: 无效的路径格式 - {path}"
-    
+
     if not _is_path_allowed(str(abs_path)):
         return f"[目录列表] 错误: 路径超出允许范围 - {abs_path}"
-    
+
     if not abs_path.exists():
         return f"[目录列表] 错误: 路径不存在 - {abs_path}"
-    
+
     if not abs_path.is_dir():
         return f"[目录列表] 错误: 路径不是目录 - {abs_path}"
-    
+
     try:
         result_lines = [f"[目录] {abs_path}"]
         items = list(abs_path.iterdir())
-        
+
         dirs = []
         files = []
         for item in items:
@@ -302,24 +520,22 @@ def list_dir(path: str = ".", show_hidden: bool = False, recursive: bool = False
                 dirs.append(item)
             else:
                 files.append(item)
-        
+
         total_items = len(dirs) + len(files)
         result_lines.append(f"[总计] {total_items} 个项目 ({len(dirs)} 个目录, {len(files)} 个文件)")
         result_lines.append("")
-        
+
         if dirs:
             result_lines.append("[目录]")
             for d in sorted(dirs):
                 try:
-                    stat = d.stat()
                     mtime = os.path.getmtime(d)
-                    import datetime
-                    dt = datetime.datetime.fromtimestamp(mtime)
+                    dt = datetime.fromtimestamp(mtime)
                     time_str = dt.strftime("%Y-%m-%d %H:%M")
                     result_lines.append(f"  drwxr-xr-x  {d.name}/        {time_str}")
                 except Exception:
                     result_lines.append(f"  drwxr-xr-x  {d.name}/")
-        
+
         if files:
             result_lines.append("\n[文件]")
             for f in sorted(files):
@@ -333,98 +549,99 @@ def list_dir(path: str = ".", show_hidden: bool = False, recursive: bool = False
                     else:
                         size_str = f"{size / (1024 * 1024):.1f} MB"
                     mtime = os.path.getmtime(f)
-                    import datetime
-                    dt = datetime.datetime.fromtimestamp(mtime)
+                    dt = datetime.fromtimestamp(mtime)
                     time_str = dt.strftime("%Y-%m-%d %H:%M")
                     result_lines.append(f"  -rw-r--r--  {f.name:<25} {time_str}  {size_str:>10}")
                 except Exception:
                     result_lines.append(f"  -rw-r--r--  {f.name}")
-        
+
         if recursive and dirs:
             result_lines.append("\n" + "=" * 60)
             result_lines.append("[递归子目录内容]")
             for d in sorted(dirs):
-                sub_result = list_dir(str(d), show_hidden, recursive)
+                sub_result = list_directory(str(d), show_hidden, recursive)
                 result_lines.append(f"\n{sub_result}")
-        
+
         return '\n'.join(result_lines)
-    
+
     except PermissionError:
         return f"[目录列表] 错误: 权限不足 - {abs_path}"
     except Exception as e:
         return f"[目录列表] 错误: {str(e)}"
 
 
+# 向后兼容别名
+list_dir = list_directory
+
+
 # ============================================================================
-# 代码编辑
+# 文件创建操作
 # ============================================================================
 
-EDITABLE_EXTENSIONS = {
-    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.kt', '.go', '.rs',
-    '.c', '.cpp', '.h', '.hpp', '.rb', '.php', '.html', '.css', '.scss',
-    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.md', '.txt',
-    '.sh', '.sql', '.xml', '.svg'
-}
-
-EDIT_FORBIDDEN_PATTERNS = ['.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json']
-
-
-def check_syntax(file_path: str) -> str:
-    """检查 Python 文件的语法正确性"""
-    import ast
-    import traceback
-    
-    if not file_path:
-        return "[语法检查] 错误: 文件路径不能为空"
-    
-    file_path = file_path.strip()
-    
-    try:
-        abs_path = Path(file_path).resolve()
-    except Exception as e:
-        return f"[语法检查] 错误: 无效的路径 - {e}"
-    
-    if not abs_path.exists():
-        return f"[语法检查] 错误: 文件不存在 - {abs_path}"
-    
-    if abs_path.suffix.lower() != '.py':
-        return f"[语法检查] 错误: 仅支持 .py 文件 - {abs_path}"
-    
-    try:
-        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            source = f.read()
-        
-        ast.parse(source, filename=str(abs_path))
-        return "Syntax OK"
-    
-    except SyntaxError as e:
-        lines = [
-            "=" * 60,
-            "[语法检查] 发现语法错误",
-            "=" * 60,
-            f"文件: {abs_path}",
-            f"行号: {e.lineno}",
-            f"错误: {e.msg if hasattr(e, 'msg') else str(e)}",
-            "",
-            traceback.format_exception(type(e).__name__, e, e.__traceback__)[-1],
-            "=" * 60,
-            "建议修复后重新调用 check_syntax",
-            "=" * 60,
-        ]
-        return '\n'.join(lines)
-    
-    except Exception as e:
-        return f"[语法检查] 错误: {str(e)}"
-
-
-def edit_local_file(file_path: str, search_string: str,
-                   replace_string: str, create_backup: bool = True) -> str:
+def create_file(
+    file_path: str,
+    content: str,
+    use_workspace: bool = True
+) -> str:
     """
-    编辑本地文件，替换指定内容（精准微创手术版）。
+    创建新文件或覆盖现有文件
+
+    Args:
+        file_path: 文件路径
+        content: 文件内容
+        use_workspace: 是否使用 workspace 目录前缀
+
+    Returns:
+        操作结果
+    """
+    # 处理 workspace 前缀
+    if use_workspace and not os.path.isabs(file_path):
+        if not file_path.startswith("workspace"):
+            file_path = os.path.join("workspace", file_path)
+
+    # 获取绝对路径
+    abs_path = os.path.abspath(file_path)
+
+    # 确保目录存在
+    parent_dir = os.path.dirname(abs_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    try:
+        with open(abs_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        if os.path.exists(abs_path):
+            file_size = os.path.getsize(abs_path)
+            line_count = content.count('\n') + 1 if content else 0
+            return f"[创建文件] [OK] 成功\n文件: {abs_path}\n大小: {file_size} 字节\n行数: {line_count}"
+        else:
+            return f"[创建文件] [FAIL] 创建失败"
+
+    except Exception as e:
+        return f"[创建文件] [ERROR] {type(e).__name__}: {str(e)}"
+
+
+# 向后兼容别名
+create_file_tool = create_file
+
+
+# ============================================================================
+# 文件编辑操作
+# ============================================================================
+
+def edit_file(
+    file_path: str,
+    search_string: str,
+    replace_string: str,
+    create_backup: bool = True
+) -> str:
+    """
+    编辑本地文件，替换指定内容
 
     Args:
         file_path: 要编辑的文件路径
-        search_string: 要替换的原字符串（必须精确匹配）
+        search_string: 要替换的原字符串
         replace_string: 替换后的新字符串
         create_backup: 是否创建备份，默认 True
 
@@ -447,7 +664,7 @@ def edit_local_file(file_path: str, search_string: str,
         return f"[文件编辑] 错误: 不支持的文件类型 - {ext}"
 
     abs_str = str(abs_path).lower()
-    for pattern in EDIT_FORBIDDEN_PATTERNS:
+    for pattern in FORBIDDEN_PATTERNS:
         if pattern in abs_str:
             return f"[文件编辑] 错误: 禁止编辑敏感文件 - {abs_path}"
 
@@ -456,12 +673,11 @@ def edit_local_file(file_path: str, search_string: str,
             old_content = f.read()
             lines = old_content.split('\n')
 
-        # 增强的多匹配检测
+        # 多匹配检测
         count = old_content.count(search_string)
         if count == 0:
             return f"[文件编辑] 错误: 未找到目标代码"
         if count > 1:
-            # 找出所有匹配的详细行号
             match_lines = []
             for i, line in enumerate(lines, 1):
                 if search_string in line:
@@ -475,8 +691,7 @@ def edit_local_file(file_path: str, search_string: str,
         if create_backup:
             backup_dir = abs_path.parent / "backups"
             backup_dir.mkdir(exist_ok=True)
-            import datetime
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_path = backup_dir / f"{abs_path.stem}_{timestamp}{abs_path.suffix}"
             shutil.copy2(abs_path, backup_path)
 
@@ -491,7 +706,7 @@ def edit_local_file(file_path: str, search_string: str,
             f"文件: {abs_path}",
             f"修改: {count} 处",
             "=" * 50,
-            "建议: 立即调用 check_syntax 进行语法自检",
+            "建议: 立即调用 check_python_syntax 进行语法自检",
             "=" * 50,
         ]
         return '\n'.join(result)
@@ -502,21 +717,24 @@ def edit_local_file(file_path: str, search_string: str,
         return f"[文件编辑] 错误: {str(e)}"
 
 
-def list_symbols_in_file(file_path: str) -> str:
-    """
-    提取 Python 文件中的符号大纲（类似 Cursor Outline 视图）。
+# 向后兼容别名
+edit_local_file = edit_file
 
-    使用 AST 解析文件，只提取 class、def、global variable 定义，
-    不读取函数体内容，极度节省 Token。
+
+# ============================================================================
+# 符号提取（AST）
+# ============================================================================
+
+def extract_symbols(file_path: str) -> str:
+    """
+    提取 Python 文件中的符号大纲（类、函数、全局变量）
 
     Args:
         file_path: Python 文件路径
 
     Returns:
-        格式化的符号列表，包含名称、行号、类型
+        格式化的符号列表
     """
-    import ast
-
     if not file_path:
         return "[符号提取] 错误: 文件路径不能为空"
 
@@ -536,12 +754,10 @@ def list_symbols_in_file(file_path: str) -> str:
             source = f.read()
 
         tree = ast.parse(source, filename=str(abs_path))
-
         symbols = []
 
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                # 获取类的基类
                 bases = []
                 for base in node.bases:
                     if isinstance(base, ast.Name):
@@ -557,7 +773,6 @@ def list_symbols_in_file(file_path: str) -> str:
                 })
 
             elif isinstance(node, ast.FunctionDef) and node.col_offset == 0:
-                # 顶层函数
                 is_async = isinstance(node, ast.AsyncFunctionDef)
                 symbols.append({
                     'type': 'ASYNC_DEF' if is_async else 'DEF',
@@ -567,7 +782,6 @@ def list_symbols_in_file(file_path: str) -> str:
                 })
 
             elif isinstance(node, ast.Assign):
-                # 全局变量（顶层赋值语句）
                 if node.col_offset == 0:
                     for target in node.targets:
                         if isinstance(target, ast.Name):
@@ -580,7 +794,6 @@ def list_symbols_in_file(file_path: str) -> str:
         if not symbols:
             return f"[符号] {abs_path.name}\n(文件为空或不包含顶层定义)"
 
-        # 格式化输出
         result_lines = [
             f"[符号] {abs_path.name}",
             f"[总计] {len(symbols)} 个符号",
@@ -612,50 +825,8 @@ def list_symbols_in_file(file_path: str) -> str:
         return f"[符号提取] 错误: {str(e)}"
 
 
-def create_new_file(file_path: str, content: str = "", overwrite: bool = False) -> str:
-    """创建新文件或覆盖现有文件"""
-    if not file_path:
-        return "[创建文件] 错误: 文件路径不能为空"
-    
-    try:
-        abs_path = Path(file_path).resolve()
-    except Exception as e:
-        return f"[创建文件] 错误: 无效的路径 - {e}"
-    
-    abs_str = str(abs_path).lower()
-    for pattern in EDIT_FORBIDDEN_PATTERNS:
-        if pattern in abs_str:
-            return f"[创建文件] 错误: 禁止创建敏感文件 - {abs_path}"
-    
-    try:
-        if abs_path.exists():
-            if not overwrite:
-                return f"[创建文件] 错误: 文件已存在 (overwrite=False)"
-            backup_path = abs_path.with_suffix(abs_path.suffix + '.backup')
-            shutil.copy2(abs_path, backup_path)
-        
-        parent = abs_path.parent
-        if not parent.exists():
-            parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(abs_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        file_size = len(content.encode('utf-8'))
-        line_count = content.count('\n') + 1 if content else 0
-        
-        result = [
-            "[创建文件] [OK] 成功",
-            f"文件: {abs_path}",
-            f"大小: {file_size} 字节",
-            f"行数: {line_count}",
-        ]
-        return '\n'.join(result)
-    
-    except PermissionError:
-        return "[创建文件] 错误: 权限不足"
-    except Exception as e:
-        return f"[创建文件] 错误: {str(e)}"
+# 向后兼容别名
+list_symbols_in_file = extract_symbols
 
 
 # ============================================================================
@@ -665,16 +836,15 @@ def create_new_file(file_path: str, content: str = "", overwrite: bool = False) 
 def backup_project(version_note: str = "") -> str:
     """创建项目备份"""
     import zipfile
-    from datetime import datetime
-    
+
     PROJECT_ROOT = Path(__file__).parent.parent.resolve()
     BACKUP_DIR = PROJECT_ROOT / "backups"
     BACKUP_DIR.mkdir(exist_ok=True)
-    
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_name = f"backup_{timestamp}.zip"
     backup_path = BACKUP_DIR / backup_name
-    
+
     try:
         with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for pattern in ['*.py', '*.json', '*.toml', '*.md']:
@@ -682,16 +852,16 @@ def backup_project(version_note: str = "") -> str:
                     if 'backup' not in str(f) and '__pycache__' not in str(f):
                         arcname = f.relative_to(PROJECT_ROOT)
                         zf.write(f, arcname)
-            
+
             tools_dir = PROJECT_ROOT / 'tools'
             if tools_dir.exists():
                 for f in tools_dir.glob('*.py'):
                     arcname = f.relative_to(PROJECT_ROOT)
                     zf.write(f, arcname)
-        
+
         size = backup_path.stat().st_size
         size_str = f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / (1024 * 1024):.1f} MB"
-        
+
         result = [
             "=" * 50,
             "[备份] [OK] 备份成功",
@@ -701,245 +871,29 @@ def backup_project(version_note: str = "") -> str:
             "=" * 50,
         ]
         return '\n'.join(result)
-    
+
     except Exception as e:
         return f"[备份] 错误: {str(e)}"
 
 
-# ============================================================================
-# Agent 状态与测试
-# ============================================================================
-
-def run_self_test() -> str:
-    """运行 Agent 核心功能的自我测试"""
-    import sys
-    results = []
-    all_passed = True
-    
-    results.append("=" * 50)
-    results.append("[自检] Agent 核心功能测试")
-    results.append("=" * 50)
-    
-    try:
-        from tools import web_tools, memory_tools
-        results.append("[OK] 核心模块导入成功")
-    except Exception as e:
-        results.append(f"[FAIL] 核心模块导入失败: {e}")
-        all_passed = False
-    
-    try:
-        from config import get_config
-        cfg = get_config()
-        results.append(f"[OK] 配置加载成功 (模型: {cfg.llm.model_name})")
-    except Exception as e:
-        results.append(f"[!] 配置加载失败: {e}")
-    
-    try:
-        from tools.cmd_tools import run_cmd, read_file, list_dir
-        results.append("[OK] CMD 工具模块正常")
-    except Exception as e:
-        results.append(f"[FAIL] CMD 工具模块失败: {e}")
-        all_passed = False
-    
-    try:
-        from tools.cmd_tools import check_syntax
-        result = check_syntax(__file__)
-        if "Syntax OK" in result or "语法检查" in result:
-            results.append("[OK] 语法检查功能正常")
-        else:
-            results.append(f"[FAIL] 语法检查异常: {result[:100]}")
-    except Exception as e:
-        results.append(f"[FAIL] 语法检查失败: {e}")
-    
-    try:
-        from tools.memory_tools import get_generation, get_current_goal
-        gen = get_generation()
-        goal = get_current_goal()
-        results.append(f"[OK] 记忆系统正常 (G{gen})")
-    except Exception as e:
-        results.append(f"[FAIL] 记忆系统失败: {e}")
-        all_passed = False
-    
-    try:
-        restarter_path = Path(__file__).parent.parent / "restarter.py"
-        if restarter_path.exists():
-            results.append("[OK] restarter.py 存在")
-        else:
-            results.append("[FAIL] restarter.py 不存在 (危险!)")
-            all_passed = False
-    except Exception as e:
-        results.append(f"[FAIL] restarter 检查失败: {e}")
-        all_passed = False
-    
-    results.append("=" * 50)
-    if all_passed:
-        results.append("[自检] [OK] 所有测试通过")
-    else:
-        results.append("[自检] ✗ 部分测试失败，请检查")
-    results.append("=" * 50)
-    
-    return '\n'.join(results)
-
-
-def get_agent_status() -> str:
-    """获取 Agent 当前状态概览"""
-    from datetime import datetime
-    from tools.memory_tools import get_generation, get_current_goal, get_core_context
-    
-    PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-    
-    try:
-        from config import get_config
-        cfg = get_config()
-        model = cfg.llm.model_name
-        interval = cfg.agent.awake_interval
-    except:
-        model = "未知"
-        interval = 60
-    
-    gen = get_generation()
-    goal = get_current_goal()
-    context = get_core_context()
-    
-    lines = [
-        "=" * 50,
-        "[状态] Agent 运行状态",
-        "=" * 50,
-        f"世代: G{gen}",
-        f"模型: {model}",
-        f"苏醒间隔: {interval}秒",
-        f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"工作目录: {PROJECT_ROOT}",
-        "",
-        f"当前目标: {goal or '未设置'}",
-        "",
-        f"核心上下文: {context[:100]}{'...' if len(context) > 100 else ''}",
-        "=" * 50,
-    ]
-    return '\n'.join(lines)
+# 向后兼容别名
+backup_project_tool = backup_project
 
 
 # ============================================================================
-# 文件删除（自动清理测试文件）
+# 测试文件清理
 # ============================================================================
-
-# 允许删除的目录（仅允许删除测试相关目录，防止误删重要文件）
-ALLOWED_DELETE_DIRS = [
-    os.path.dirname(os.path.abspath(__file__)),  # tools/
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # 项目根目录
-]
-
-# 禁止删除的文件/目录模式
-FORBIDDEN_DELETE_PATTERNS = [
-    '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
-    'config.py', 'config.toml', '.git', 'restarter.py', 'agent.py',
-    '__pycache__', '.pytest_cache', '.gitignore',
-]
-
-# 允许删除的文件类型（测试相关文件）
-ALLOWED_DELETE_EXTENSIONS = {
-    '.py',  # 测试文件
-    '.txt', '.log', '.json',  # 测试生成的临时文件
-    '.tmp', '.bak', '.backup',  # 备份文件
-}
-
-
-def delete_file(file_path: str, force: bool = False) -> str:
-    """
-    删除指定的文件或目录。
-
-    【好习惯】完成测试任务后，自动清理测试产生的临时文件。
-    保持工作目录整洁，避免垃圾文件堆积。
-
-    Args:
-        file_path: 要删除的文件或目录路径
-        force: 是否强制删除（跳过部分安全检查，仅用于确认安全的临时文件）
-
-    Returns:
-        操作结果描述
-    """
-    if not file_path or not isinstance(file_path, str):
-        return "[删除文件] 错误: 路径不能为空"
-
-    file_path = file_path.strip()
-    if not file_path:
-        return "[删除文件] 错误: 路径不能为空"
-
-    try:
-        abs_path = Path(file_path).resolve()
-    except Exception as e:
-        return f"[删除文件] 错误: 无效的路径 - {e}"
-
-    # 检查路径是否在允许范围内
-    is_allowed_dir = False
-    for allowed_dir in ALLOWED_DELETE_DIRS:
-        allowed_abs = os.path.abspath(allowed_dir)
-        if str(abs_path).startswith(allowed_abs):
-            is_allowed_dir = True
-            break
-
-    if not is_allowed_dir:
-        return f"[删除文件] 错误: 路径超出允许范围 - {abs_path}"
-
-    # 检查禁止删除的模式
-    abs_str_lower = str(abs_path).lower()
-    for pattern in FORBIDDEN_DELETE_PATTERNS:
-        if pattern.lower() in abs_str_lower:
-            return f"[删除文件] 错误: 禁止删除受保护的文件/目录 - {abs_path.name}"
-
-    # 非强制模式下，检查文件类型
-    if not force and abs_path.is_file():
-        ext = abs_path.suffix.lower()
-        if ext not in ALLOWED_DELETE_EXTENSIONS and ext:
-            return f"[删除文件] 错误: 不允许删除此类型文件 - {ext} (force=True 可强制删除)"
-
-    # 检查文件/目录是否存在
-    if not abs_path.exists():
-        return f"[删除文件] 错误: 文件/目录不存在 - {abs_path}"
-
-    try:
-        deleted_items = []
-
-        if abs_path.is_file():
-            # 删除单个文件
-            size = abs_path.stat().st_size
-            abs_path.unlink()
-            deleted_items.append(f"  [文件] {abs_path.name} ({size} 字节)")
-        elif abs_path.is_dir():
-            # 删除目录及其内容
-            total_files = sum(1 for _ in abs_path.rglob('*') if _.is_file())
-            shutil.rmtree(abs_path)
-            deleted_items.append(f"  [目录] {abs_path.name}/ ({total_files} 个文件)")
-
-        result = [
-            "=" * 50,
-            "[删除文件] 成功",
-            f"路径: {abs_path}",
-            *deleted_items,
-            "=" * 50,
-            "【好习惯】测试文件已清理完毕，保持工作目录整洁！",
-            "=" * 50,
-        ]
-        return '\n'.join(result)
-
-    except PermissionError:
-        return f"[删除文件] 错误: 权限不足 - {abs_path}"
-    except Exception as e:
-        return f"[删除文件] 错误: {str(e)}"
-
 
 def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
     """
-    清理指定目录下的测试相关临时文件。
-
-    【好习惯】定期清理测试产生的临时文件，避免垃圾堆积。
+    清理指定目录下的测试相关临时文件
 
     Args:
         directory: 要扫描的目录，默认为当前目录
         dry_run: 是否仅模拟运行（不实际删除）
 
     Returns:
-        操作结果描述，包含找到的可删除文件列表
+        操作结果
     """
     if not directory or not isinstance(directory, str):
         return "[清理测试文件] 错误: 目录路径不能为空"
@@ -955,16 +909,15 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
     if not abs_dir.is_dir():
         return f"[清理测试文件] 错误: 路径不是目录 - {abs_dir}"
 
-    # 要清理的文件/目录模式
     CLEANUP_PATTERNS = [
-        '**/test_*.py',  # 测试文件
+        '**/test_*.py',
         '**/__pycache__',
         '**/*.pyc',
         '**/*.pyo',
         '**/.pytest_cache',
         '**/*.tmp',
         '**/*.log',
-        '**/workspace/backups/*',  # 过期的备份文件
+        '**/workspace/backups/*',
     ]
 
     found_files = []
@@ -973,7 +926,6 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
     try:
         for pattern in CLEANUP_PATTERNS:
             for item in abs_dir.glob(pattern):
-                # 跳过禁止删除的路径
                 is_protected = False
                 for protected in FORBIDDEN_DELETE_PATTERNS:
                     if protected.lower() in str(item).lower():
@@ -984,7 +936,6 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
                     protected_files.append(str(item))
                     continue
 
-                # 跳过必要文件
                 if item.name in ['agent.py', 'config.py', 'restarter.py']:
                     protected_files.append(str(item))
                     continue
@@ -992,13 +943,8 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
                 found_files.append(item)
 
         if not found_files:
-            result = [
-                "[清理测试文件] 未找到需要清理的文件",
-                f"扫描目录: {abs_dir}",
-            ]
-            return '\n'.join(result)
+            return f"[清理测试文件] 未找到需要清理的文件\n扫描目录: {abs_dir}"
 
-        # 统计大小
         total_size = sum(f.stat().st_size for f in found_files if f.is_file())
 
         result = [
@@ -1011,7 +957,7 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
             "[可清理文件]",
         ]
 
-        for f in found_files[:20]:  # 最多显示20个
+        for f in found_files[:20]:
             if f.is_file():
                 size = f.stat().st_size
                 result.append(f"  {f.relative_to(abs_dir)} ({size} 字节)")
@@ -1031,9 +977,8 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
 
         if dry_run:
             result.append("[提示] 这是模拟运行，文件未被实际删除")
-            result.append("如需删除，请使用 delete_file_tool 逐个删除")
+            result.append("如需删除，请使用 cleanup_test_files 确认删除")
         else:
-            # 执行删除
             deleted_count = 0
             for f in found_files:
                 try:
@@ -1052,3 +997,200 @@ def cleanup_test_files(directory: str = ".", dry_run: bool = False) -> str:
 
     except Exception as e:
         return f"[清理测试文件] 错误: {str(e)}"
+
+
+# ============================================================================
+# Agent 状态与测试
+# ============================================================================
+
+def self_test() -> str:
+    """运行 Agent 核心功能的自我测试"""
+    results = []
+    all_passed = True
+
+    results.append("=" * 50)
+    results.append("[自检] Agent 核心功能测试")
+    results.append("=" * 50)
+
+    try:
+        from tools import web_tools, memory_tools
+        results.append("[OK] 核心模块导入成功")
+    except Exception as e:
+        results.append(f"[FAIL] 核心模块导入失败: {e}")
+        all_passed = False
+
+    try:
+        from config import get_config
+        cfg = get_config()
+        results.append(f"[OK] 配置加载成功 (模型: {cfg.llm.model_name})")
+    except Exception as e:
+        results.append(f"[!] 配置加载失败: {e}")
+
+    try:
+        result = check_python_syntax(__file__)
+        if "Syntax OK" in result or "语法检查" in result:
+            results.append("[OK] 语法检查功能正常")
+        else:
+            results.append(f"[FAIL] 语法检查异常: {result[:100]}")
+    except Exception as e:
+        results.append(f"[FAIL] 语法检查失败: {e}")
+
+    try:
+        from tools.memory_tools import get_generation_tool, get_current_goal
+        gen = get_generation_tool()
+        goal = get_current_goal()
+        results.append(f"[OK] 记忆系统正常 (G{gen})")
+    except Exception as e:
+        results.append(f"[FAIL] 记忆系统失败: {e}")
+        all_passed = False
+
+    try:
+        restarter_path = PROJECT_ROOT / "restarter.py"
+        if restarter_path.exists():
+            results.append("[OK] restarter.py 存在")
+        else:
+            results.append("[FAIL] restarter.py 不存在 (危险!)")
+            all_passed = False
+    except Exception as e:
+        results.append(f"[FAIL] restarter 检查失败: {e}")
+        all_passed = False
+
+    results.append("=" * 50)
+    if all_passed:
+        results.append("[自检] [OK] 所有测试通过")
+    else:
+        results.append("[自检] 部分测试失败，请检查")
+    results.append("=" * 50)
+
+    return '\n'.join(results)
+
+
+def get_agent_status() -> str:
+    """获取 Agent 当前状态概览"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        model = cfg.llm.model_name
+        interval = cfg.agent.awake_interval
+    except:
+        model = "未知"
+        interval = 60
+
+    try:
+        from tools.memory_tools import get_generation_tool, get_current_goal, get_core_context
+        gen = get_generation_tool()
+        goal = get_current_goal()
+        context = get_core_context()
+    except:
+        gen = "?"
+        goal = "未知"
+        context = "无法获取"
+
+    lines = [
+        "=" * 50,
+        "[状态] Agent 运行状态",
+        "=" * 50,
+        f"世代: G{gen}",
+        f"模型: {model}",
+        f"苏醒间隔: {interval}秒",
+        f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"工作目录: {PROJECT_ROOT}",
+        "",
+        f"当前目标: {goal or '未设置'}",
+        "",
+        f"核心上下文: {context[:100]}{'...' if len(context) > 100 else ''}",
+        "=" * 50,
+    ]
+    return '\n'.join(lines)
+
+
+# ============================================================================
+# 工具注册函数
+# ============================================================================
+
+def get_shell_tools():
+    """
+    获取所有 Shell 工具的字典映射
+
+    Returns:
+        工具名称到函数的映射字典
+    """
+    return {
+        # 命令执行
+        'execute_shell_command': execute_shell_command,
+        'run_powershell': run_powershell,
+        'run_batch': run_batch,
+        'quick_ping': quick_ping,
+        # Python 检查
+        'check_python_syntax': check_python_syntax,
+        'run_pytest': run_pytest,
+        # 文件操作
+        'read_file': read_file,
+        'list_directory': list_directory,
+        'create_file': create_file,
+        'edit_file': edit_file,
+        'extract_symbols': extract_symbols,
+        # 项目管理
+        'backup_project': backup_project,
+        'cleanup_test_files': cleanup_test_files,
+        # Agent 状态
+        'self_test': self_test,
+        'get_agent_status': get_agent_status,
+    }
+
+
+# 向后兼容：保留旧函数名
+def create_cli_tools():
+    """创建 CLI 工具集（向后兼容）"""
+    return get_shell_tools()
+
+
+# ============================================================================
+# 更多向后兼容别名（在 __all__ 之前定义）
+# ============================================================================
+
+# create_new_file 别名
+create_new_file = create_file
+
+# check_syntax 别名
+check_syntax = check_python_syntax
+
+
+# ============================================================================
+# 模块初始化
+# ============================================================================
+
+# 导出所有主要函数
+__all__ = [
+    # 命令执行
+    'execute_shell_command',
+    'execute_cli_command',
+    'run_cmd',
+    'run_powershell',
+    'run_batch',
+    'quick_ping',
+    # Python 检查
+    'check_python_syntax',
+    'run_pytest',
+    # 文件操作
+    'read_file',
+    'read_local_file',
+    'list_directory',
+    'list_dir',
+    'create_file',
+    'create_file_tool',
+    'edit_file',
+    'edit_local_file',
+    'extract_symbols',
+    'list_symbols_in_file',
+    # 项目管理
+    'backup_project',
+    'backup_project_tool',
+    'cleanup_test_files',
+    # Agent 状态
+    'self_test',
+    'get_agent_status',
+    # 工具注册
+    'get_shell_tools',
+    'create_cli_tools',
+]

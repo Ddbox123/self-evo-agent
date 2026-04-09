@@ -23,12 +23,12 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.cmd_tools import (
+from tools.shell_tools import (
     read_file,
-    list_dir,
-    edit_local_file,
-    create_new_file,
-    check_syntax,
+    list_directoryectory,
+    edit_file,
+    create_file,
+    check_python_syntax,
     backup_project,
 )
 from tools.search_tools import (
@@ -52,17 +52,17 @@ class TestFileOperations:
         # 检查是否有错误标识
         assert "不存在" in result or "Error" in result or "错误" in result or "[文件读取]" in result
 
-    def test_list_dir_current_directory(self):
+    def test_list_directory_current_directory(self):
         """测试列出当前目录"""
-        result = list_dir(".")
+        result = list_directory(".")
         assert isinstance(result, str)
         # 应该包含当前目录的某些文件
         assert len(result) > 0
 
-    def test_list_dir_with_max_lines(self):
+    def test_list_directory_with_max_lines(self):
         """测试带行数限制的目录列表"""
-        result = list_dir(".")
-        # list_dir 返回字符串
+        result = list_directory(".")
+        # list_directory 返回字符串
         assert isinstance(result, str)
         assert len(result) > 0
 

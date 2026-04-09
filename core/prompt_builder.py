@@ -64,9 +64,9 @@ def _load_memory_context() -> Dict[str, Any]:
     try:
         import sys
         sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-        from tools.memory_tools import read_memory
+        from tools.memory_tools import read_memory_tool
 
-        memory = read_memory()
+        memory = read_memory_tool()
         return {
             "generation": memory.get("generation", 1),
             "total_generations": memory.get("total_generations", 1),

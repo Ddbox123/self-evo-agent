@@ -246,7 +246,7 @@ def spawn_detached_process(command: list, env: Optional[dict] = None) -> Optiona
 # 核心功能函数
 # ============================================================================
 
-def trigger_self_restart(reason: str = "") -> str:
+def trigger_self_restart_tool(reason: str = "") -> str:
     """
     触发 Agent 自我重启。
     
@@ -333,8 +333,8 @@ def trigger_self_restart(reason: str = "") -> str:
     # 0. 【强制记忆快照】在重启前自动保存状态
     # 这是最后一道防线，确保即使 Agent 没有主动保存记忆，系统也会自动保存
     try:
-        from tools.memory_tools import force_save_current_state, get_generation, get_core_context, get_current_goal
-        current_gen = get_generation()
+        from tools.memory_tools import force_save_current_state, get_generation_tool, get_core_context, get_current_goal
+        current_gen = get_generation_tool()
         core_ctx = get_core_context() or "无"
         current_goal = get_current_goal() or "待定"
 
@@ -455,3 +455,41 @@ def write_restart_log(pid: int, reason: str, success: bool) -> None:
     
     with open(log_path, 'a', encoding='utf-8') as f:
         f.write(f"{timestamp} | PID:{pid} | {status} | {reason}\n")
+
+
+def enter_hibernation_tool(duration: int = 300) -> str:
+    """
+    让 Agent 进入休眠状态一段时间。
+
+    休眠期间 Agent 不执行任何操作，等待指定时间后自动苏醒。
+    适用于需要等待外部条件成熟的场景，如：
+    - 等待代码部署完成
+    - 等待外部服务就绪
+    - 降低资源占用
+
+    Args:
+        duration: 休眠时长（秒），默认 300 秒（5 分钟）
+                  建议范围：60 ~ 3600 秒
+
+    Returns:
+        操作结果描述字符串
+
+    Example:
+        >>> enter_hibernation(duration=60)
+        '[休眠] 已进入休眠状态，60 秒后自动苏醒'
+    """
+    import time
+    from datetime import datetime, timedelta
+
+    if duration < 1:
+        return "错误: 休眠时长必须大于 0 秒"
+
+    if duration > 7200:
+        return "错误: 休眠时长不能超过 7200 秒（2 小时）"
+
+    wake_time = datetime.now() + timedelta(seconds=duration)
+    logger.info(f"[休眠] 进入休眠状态，时长: {duration} 秒，预计苏醒: {wake_time.strftime('%H:%M:%S')}")
+
+    time.sleep(duration)
+
+    return f"[苏醒] 休眠结束，已自动苏醒（休眠了 {duration} 秒）"

@@ -111,7 +111,7 @@ def _save_memory(memory: dict) -> bool:
 
 
 
-def read_memory() -> str:
+def read_memory_tool() -> str:
     """
     读取当前的世代索引（轻量级，不加载详细档案）。
     
@@ -126,7 +126,7 @@ def read_memory() -> str:
     return json.dumps(memory, ensure_ascii=False, indent=2)
 
 
-def get_memory_summary() -> str:
+def get_memory_summary_tool() -> str:
     """
     获取人类可读的记忆摘要，用于注入到Prompt中。
     
@@ -148,7 +148,7 @@ def get_memory_summary() -> str:
     return "\n".join(lines)
 
 
-def get_generation() -> int:
+def get_generation_tool() -> int:
     """获取当前世代数"""
     return _load_memory().get("current_generation", 1)
 
@@ -215,7 +215,7 @@ def archive_generation_history(
         }, ensure_ascii=False)
 
 
-def read_generation_archive(generation: int) -> str:
+def read_generation_archive_tool(generation: int) -> str:
     """
     读取指定世代的详细档案。
     
@@ -246,7 +246,7 @@ def read_generation_archive(generation: int) -> str:
         }, ensure_ascii=False)
 
 
-def list_archives() -> str:
+def list_archives_tool() -> str:
     """
     列出所有可用的世代档案。
     
@@ -283,7 +283,7 @@ def list_archives() -> str:
     }, ensure_ascii=False)
 
 
-def commit_compressed_memory(new_core_context: str, next_goal: str) -> str:
+def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
     """
     更新记忆索引（世代号递增由 archive_generation_history 处理）。
     
@@ -403,7 +403,7 @@ def advance_generation() -> int:
 # 动态提示词管理
 # ============================================================================
 
-def read_dynamic_prompt() -> str:
+def read_dynamic_prompt_tool() -> str:
     """
     读取当前的动态提示词内容。
     
@@ -419,7 +419,7 @@ def read_dynamic_prompt() -> str:
         return f"[错误: 无法读取动态提示词: {e}]"
 
 
-def update_generation_task(task: str) -> str:
+def update_generation_task_tool(task: str) -> str:
     """
     更新当前世代的任务到动态提示词区域。
     
@@ -484,7 +484,7 @@ def update_generation_task(task: str) -> str:
         }, ensure_ascii=False)
 
 
-def add_insight_to_dynamic(insight: str) -> str:
+def add_insight_to_dynamic_tool(insight: str) -> str:
     """
     将洞察追加到动态提示词的积累区域。
     
@@ -590,12 +590,12 @@ def clear_generation_task() -> str:
 
 
 # 保持向后兼容
-update_dynamic_prompt = update_generation_task
+update_dynamic_prompt = update_generation_task_tool
 
 
 # ==================== 代码库认知地图工具 ====================
 
-def record_codebase_insight(module_path: str, insight: str) -> str:
+def record_codebase_insight_tool(module_path: str, insight: str) -> str:
     """
     刻印代码库认知到数据库
 
@@ -611,10 +611,9 @@ def record_codebase_insight(module_path: str, insight: str) -> str:
     """
     try:
         from core.workspace_manager import get_workspace
-        from tools.memory_tools import get_generation
 
         ws = get_workspace()
-        current_gen = get_generation()
+        current_gen = get_generation_tool()
 
         success = ws.record_codebase_insight(module_path, insight, current_gen)
 
@@ -627,7 +626,7 @@ def record_codebase_insight(module_path: str, insight: str) -> str:
         return f"❌ 刻印异常: {str(e)}"
 
 
-def get_global_codebase_map() -> str:
+def get_global_codebase_map_tool() -> str:
     """
     获取全局代码库认知地图
 

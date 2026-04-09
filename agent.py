@@ -61,16 +61,16 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, Tool
 from langchain_openai import ChatOpenAI
 
 # 导入工具
-from tools import create_langchain_tools
+from tools import Key_Tools
 from tools.token_manager import EnhancedTokenCompressor, estimate_messages_tokens
 from tools.memory_tools import (
-    get_generation, get_core_context, get_current_goal,
+    get_generation_tool, get_core_context, get_current_goal,
     archive_generation_history, advance_generation,
     _load_memory, clear_generation_task,
-    read_dynamic_prompt, update_generation_task, add_insight_to_dynamic,
+    read_dynamic_prompt_tool, update_generation_task_tool, add_insight_to_dynamic_tool,
 )
 from tools.task_tools import check_restart_block
-from tools.rebirth_tools import trigger_self_restart
+from tools.rebirth_tools import trigger_self_restart_tool
 
 # 导入 CLI UI
 from core.cli_ui import get_ui, ui_error
@@ -102,93 +102,16 @@ class ToolExecutor:
 
     def _register_default_tools(self):
         """注册默认工具映射"""
-        # 延迟导入避免循环
-        from tools.web_tools import web_search, read_webpage
-        from tools.cmd_tools import (
-            read_file, list_dir, edit_local_file, create_new_file,
-            check_syntax, list_symbols_in_file, backup_project,
-            run_self_test, get_agent_status, delete_file, cleanup_test_files,
-            run_cmd, run_powershell, run_batch,
+        from tools.tool_list import (
+            build_tool_map_with_suffix,
+            TOOL_TIMEOUT_MAP,
+            RETRYABLE_TOOLS,
         )
-        from tools.search_tools import (
-            grep_search, find_function_calls, find_definitions, search_and_read
-        )
-        from tools.code_tools import apply_diff_edit, validate_diff_format
-        from tools.ast_tools import list_file_entities, get_code_entity
-        from tools.memory_tools import (
-            read_memory, commit_compressed_memory, read_generation_archive, list_archives,
-        )
-        from tools.task_tools import (
-            set_plan_tool, tick_subtask_tool, modify_task_tool,
-            add_task_tool, remove_task_tool, get_task_status,
-        )
-        from tools.evolution_tracker import get_evolution_history, get_evolution_stats
-        from tools.cli_tools import execute_cli_command
 
-        # 工具映射
-        self._tool_map = {
-            "web_search_tool": web_search,
-            "read_webpage_tool": read_webpage,
-            "list_directory_tool": list_dir,
-            "read_local_file_tool": read_file,
-            "edit_local_file_tool": edit_local_file,
-            "create_new_file_tool": create_new_file,
-            "delete_file_tool": delete_file,
-            "check_syntax_tool": check_syntax,
-            "list_symbols_in_file_tool": list_symbols_in_file,
-            "backup_project_tool": backup_project,
-            "cleanup_test_files_tool": cleanup_test_files,
-            "run_self_test_tool": run_self_test,
-            "get_agent_status_tool": get_agent_status,
-            "get_evolution_history_tool": get_evolution_history,
-            "get_evolution_stats_tool": get_evolution_stats,
-            "read_memory_tool": read_memory,
-            "commit_compressed_memory_tool": commit_compressed_memory,
-            "read_dynamic_prompt_tool": read_dynamic_prompt,
-            "set_generation_task_tool": update_generation_task,
-            "add_insight_tool": add_insight_to_dynamic,
-            "read_generation_archive_tool": read_generation_archive,
-            "list_generation_archives_tool": list_archives,
-            "run_cmd_tool": run_cmd,
-            "run_powershell_tool": run_powershell,
-            "run_batch_tool": run_batch,
-            "grep_search_tool": grep_search,
-            "apply_diff_edit_tool": apply_diff_edit,
-            "validate_diff_format_tool": validate_diff_format,
-            "find_function_calls_tool": find_function_calls,
-            "find_definitions_tool": find_definitions,
-            "get_code_entity_tool": get_code_entity,
-            "list_file_entities_tool": list_file_entities,
-            "search_and_read_tool": search_and_read,
-            "set_plan_tool": set_plan_tool,
-            "tick_subtask_tool": tick_subtask_tool,
-            "modify_task_tool": modify_task_tool,
-            "add_task_tool": add_task_tool,
-            "remove_task_tool": remove_task_tool,
-            "get_task_status_tool": get_task_status,
-        }
-
-        # 超时配置
-        self._timeout_map = {
-            "web_search_tool": 30,
-            "read_webpage_tool": 20,
-            "run_cmd_tool": 60,
-            "run_powershell_tool": 60,
-            "run_batch_tool": 120,
-            "backup_project_tool": 60,
-            "check_syntax_tool": 10,
-            "read_local_file_tool": 10,
-            "edit_local_file_tool": 15,
-            "create_new_file_tool": 15,
-            "trigger_self_restart_tool": 30,
-        }
-
-        # 可重试工具
-        self._retryable_tools = {
-            "web_search_tool", "read_webpage_tool", "run_cmd_tool",
-            "run_powershell_tool", "run_batch_tool", "backup_project_tool",
-            "read_local_file_tool", "edit_local_file_tool", "create_new_file_tool",
-        }
+        # 使用统一工具映射
+        self._tool_map = build_tool_map_with_suffix()
+        self._timeout_map = TOOL_TIMEOUT_MAP
+        self._retryable_tools = RETRYABLE_TOOLS
 
     def register_tool(self, name: str, func: Callable, timeout: int = 30):
         """注册自定义工具"""
@@ -284,9 +207,9 @@ class SelfEvolvingAgent:
                 "请在 config.toml 中配置: [llm] api_key = 'your-api-key'"
             )
 
-        # 创建 LangChain Tool
-        self.tools = create_langchain_tools()
-        self.tool_map = {tool.name for tool in self.tools}
+        # 创建主要工具
+        self.key_tools = Key_Tools.create_key_tools()
+        self.key_tool_maps = {tool.name for tool in self.key_tools}
 
         # 创建 LLM
         llm_kwargs = {
@@ -303,7 +226,7 @@ class SelfEvolvingAgent:
         self.model_name = self.config.llm.model_name
 
         # 绑定工具到 LLM
-        self.llm_with_tools = self.llm.bind_tools(self.tools)
+        self.llm_with_tools = self.llm.bind_tools(self.key_tools)
 
         # 创建压缩用 LLM
         compression_llm_kwargs = {
@@ -318,11 +241,17 @@ class SelfEvolvingAgent:
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
 
         # Token 压缩器
+        import os
+        summary_prompt_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "workspace", "prompts", "COMPRESS_SUMMARY.md"
+        )
         self.token_compressor = EnhancedTokenCompressor(
             token_budget=self.config.context_compression.max_token_limit,
             max_history_pairs=self.config.context_compression.keep_recent_steps,
             compression_llm=self.compression_llm,
             enable_preemptive=True,
+            summary_prompt_path=summary_prompt_path,
         )
 
         # 全局状态
@@ -351,29 +280,41 @@ class SelfEvolvingAgent:
 
     def _build_system_prompt(self) -> str:
         """构建系统提示词"""
-        return build_system_prompt(
-            generation=get_generation(),
+        # 始终让 Agent 自主生成任务
+        base_prompt = build_system_prompt(
+            generation=get_generation_tool(),
             total_generations=_get_total_generations(),
             core_context=get_core_context(),
-            current_goal=get_current_goal(),
         )
+        
+        return base_prompt
 
     def think_and_act(self, user_prompt: str = None) -> bool:
         """
         苏醒时执行一次思考和行动
 
         流程：
-        1. 感知阶段：获取外部知识（可选）
-        2. 构建系统提示词
-        3. 调用 LLM 进行推理
-        4. 解析并执行工具调用
-        5. 返回结果给 LLM 继续推理
-        6. 直到 Agent 认为任务完成
+        1. 构建系统提示词
+        2. 调用 LLM 进行推理
+        3. 解析并执行工具调用
+        4. 返回结果给 LLM 继续推理
+        5. 直到 Agent 认为任务完成
 
         Returns:
             True: 继续运行, False: 触发重启, "hibernated": 休眠后继续
         """
         messages = [SystemMessage(content=self._build_system_prompt())]
+
+        # 自主进化模式：自动生成任务提示
+        autonomous_user_prompt = (
+            "【自主进化】你是完全自主的进化体，请根据 SOUL.md 的使命指示，"
+            "**要求**：每次仅生成一个主要任务。\n\n"
+            "首先调用 set_generation_task(task=\"...\") 设定你的任务\n"
+            "然后调用 set_plan(task=\"...\") 制定计划并执行\n"
+            "每完成一个计划调用 tick_subtask(task=\"...\") 打勾并记录结论摘要\n"
+            "所有计划完成后调用 commit_compressed_memory(task=\"...\") 保存记忆\n"
+            "最后调用 trigger_self_restart_tool(task=\"...\") 结束本轮\n"
+        )
 
         # 获取轮次编号
         if user_prompt:
@@ -381,18 +322,17 @@ class SelfEvolvingAgent:
             current_turn = logger._turn_count
         else:
             current_turn = logger._turn_count + 1
+            # 无外部输入时使用自主进化提示
+            user_prompt = autonomous_user_prompt
 
         # 首次对话写入 System Prompt
         if not self._system_prompt_written:
             logger.write_system_prompt(self._build_system_prompt())
             self._system_prompt_written = True
 
-        if user_prompt:
-            messages.append(HumanMessage(content=user_prompt))
-            logger.start_turn(current_turn)
-            logger.log_user_input(user_prompt)
-        else:
-            logger.start_turn(current_turn)
+        messages.append(HumanMessage(content=user_prompt))
+        logger.start_turn(current_turn)
+        logger.log_user_input(user_prompt)
 
         logger.log_llm_request(messages, model=self.model_name)
         max_iterations = self.config.agent.max_iterations
@@ -404,7 +344,7 @@ class SelfEvolvingAgent:
 
                 # 第一次循环打印会话开始
                 if iteration == 1:
-                    _debug_logger.session_start(self.model_name, get_generation())
+                    _debug_logger.session_start(self.model_name, get_generation_tool())
 
                 # 调用 LLM
                 response = self._invoke_llm(messages)
@@ -557,7 +497,7 @@ class SelfEvolvingAgent:
         logger.log_tool_call(tool_name, tool_args, status="called")
 
         # 特殊工具处理
-        if tool_name == "compress_context_tool":
+        if tool_name == "compress_context":
             old_tokens = estimate_messages_tokens(messages)
             messages[:] = self._compress_context(messages)
             new_tokens = estimate_messages_tokens(messages)
@@ -566,7 +506,7 @@ class SelfEvolvingAgent:
         if tool_name == "trigger_self_restart_tool":
             return self._handle_restart(tool_args, messages)
 
-        if tool_name == "enter_hibernation_tool":
+        if tool_name == "enter_hibernation":
             import re
             duration_match = re.search(r'休眠时长[:：]\s*(\d+)\s*秒', tool_args.get('reason', ''))
             hibernate_duration = int(duration_match.group(1)) if duration_match else self.config.agent.awake_interval
@@ -584,7 +524,7 @@ class SelfEvolvingAgent:
             _debug_logger.warning(f"[警告] {tool_name} 返回 None", tag="TOOL")
 
         # 标记自修改
-        if tool_name in ("edit_local_file_tool", "create_new_file_tool"):
+        if tool_name in ("edit_local_file", "create_new_file"):
             file_path = tool_args.get("file_path", "")
             if "agent.py" in file_path:
                 self._self_modified = True
@@ -626,7 +566,7 @@ class SelfEvolvingAgent:
                 return (error_msg, None)
 
         # 世代归档
-        current_gen = get_generation()
+        current_gen = get_generation_tool()
         intermediate_steps = []
         for msg in messages:
             if hasattr(msg, 'content') and isinstance(msg.content, str):
@@ -641,7 +581,7 @@ class SelfEvolvingAgent:
         new_gen = advance_generation()
         clear_generation_task()
 
-        tool_result = trigger_self_restart(**tool_args)
+        tool_result = trigger_self_restart_tool(**tool_args)
         tool_result_with_archive = f"{tool_result}\n[世代归档] G{current_gen} -> G{new_gen}"
 
         self._self_modified = False
@@ -702,16 +642,16 @@ class SelfEvolvingAgent:
 
         _debug_logger.system(f"主循环开始 (awake_interval={self.config.agent.awake_interval}s)", tag=self.name)
 
-        bc.set_state(AgentState.AWAKENING, action="系统初始化中...", generation=get_generation(), current_goal=get_current_goal())
+        bc.set_state(AgentState.AWAKENING, action="系统初始化中...", generation=get_generation_tool(), current_goal=get_current_goal())
 
-        generation = get_generation()
+        generation = get_generation_tool()
         logger.start_generation(generation, self._build_system_prompt())
         logger.log_action("会话开始", f"世代: G{generation}, 模型: {self.model_name}")
 
         last_backup_time = time.time()
 
         try:
-            _debug_logger.kv("记忆状态", f"G{get_generation()} | {get_current_goal()[:50]}")
+            _debug_logger.kv("记忆状态", f"G{get_generation_tool()} | {get_current_goal()[:50]}")
             print_evolution_time()
 
             user_input = initial_prompt
@@ -719,7 +659,6 @@ class SelfEvolvingAgent:
                 _debug_logger.system("首次任务已加载，开始执行...", tag="START")
             else:
                 _debug_logger.system(f"自主进化模式，awake_interval={self.config.agent.awake_interval}s", tag="AUTO")
-                user_input = "【自主进化】你是完全自主的进化体，请根据 SOUL.md 的使命指示，结合当前代码库状态，自主决定对你最有利的任务。"
 
             while True:
                 bc.set_state(AgentState.THINKING, action="思考并执行任务...")
@@ -728,7 +667,7 @@ class SelfEvolvingAgent:
                 if self.config.agent.auto_backup:
                     current_time = time.time()
                     if current_time - last_backup_time >= self.config.agent.backup_interval:
-                        from tools.cmd_tools import backup_project
+                        from tools.shell_tools import backup_project
                         backup_project(f"自动备份 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
                         last_backup_time = current_time
 
@@ -828,7 +767,7 @@ EVOLUTION_TEST_PROMPT = """你的第一次进化测试任务开始：
 1. 请使用 `read_local_file` 读取你当前的 `agent.py` 代码。
 2. 使用 `edit_local_file` 在 `agent.py` 中添加一个名为 `print_evolution_time()` 的简单函数。
 3. 修改完成后，使用 `check_syntax` 检查 `agent.py` 的语法。
-4. 确认语法无误后，调用 `trigger_self_restart` 重启你自己。"""
+4. 确认语法无误后，调用 `trigger_self_restart_tool` 重启你自己。"""
 
 
 def parse_args():

@@ -352,6 +352,7 @@ class EnhancedTokenCompressor:
         max_history_pairs: int = MAX_HISTORY_PAIRS,
         compression_llm: Any = None,
         enable_preemptive: bool = True,
+        summary_prompt_path: str = None,
     ):
         self.token_budget = TokenBudget(
             total_budget=token_budget,
@@ -367,6 +368,10 @@ class EnhancedTokenCompressor:
         
         # 当前压缩状态
         self._compression_level = 0  # 0=正常, 1=警告, 2=紧急
+        
+        # 摘要提示词
+        self.summary_prompt_path = summary_prompt_path
+        self._summary_prompt_cache = None
     
     @property
     def warning_threshold(self) -> int:
@@ -531,79 +536,124 @@ class EnhancedTokenCompressor:
                 i += 1
         return pairs
     
+    def _get_summary_prompt(self) -> str:
+        """获取摘要提示词（带缓存）"""
+        if self._summary_prompt_cache is not None:
+            return self._summary_prompt_cache
+        
+        if self.summary_prompt_path and os.path.exists(self.summary_prompt_path):
+            with open(self.summary_prompt_path, 'r', encoding='utf-8') as f:
+                self._summary_prompt_cache = f.read()
+        else:
+            self._summary_prompt_cache = self._get_default_summary_prompt()
+        
+        return self._summary_prompt_cache
+    
+    def _get_default_summary_prompt(self) -> str:
+        """获取默认摘要提示词"""
+        return """你是一个专门用于压缩对话历史的 AI 助手。
+
+生成一个结构化摘要，包含：
+1. 核心任务目标
+2. 关键决策
+3. 工具使用
+4. 重要结果
+5. 保留上下文
+
+格式要求：
+- 使用简洁的短句
+- 用 `|` 分隔不同部分
+- 总长度不超过 {max_chars} 字符
+- 使用中文输出"""
+    
     def _generate_summary(
         self,
         messages: List[Any],
         max_chars: int,
         reason: str = "",
     ) -> str:
-        """生成摘要"""
+        """
+        生成摘要。
+        
+        如果配置了 compression_llm，则使用 LLM 生成摘要；
+        否则回退到基于规则的摘要生成。
+        """
         if not messages:
             return ""
         
-        # 提取关键信息
-        summary_parts = []
-        tools_used = set()
-        files_modified = []
-        errors = []
-        task_goals = []
-        key_decisions = []
+        # 如果有 LLM，尝试用 LLM 生成摘要
+        if self.compression_llm:
+            try:
+                return self._generate_llm_summary(messages, max_chars, reason)
+            except Exception as e:
+                logging.warning(f"LLM 摘要生成失败，回退到规则摘要: {e}")
+                return self._generate_rule_based_summary(messages, max_chars, reason)
         
-        for msg in messages:
-            content = getattr(msg, 'content', '')
-            msg_type = getattr(msg, 'type', '')
-            
-            # 提取任务目标
-            if msg_type == 'human' and ('核心目标' in content or '主要任务' in content or '本世代目标' in content):
-                task_goals.append(content.strip())
-            elif msg_type == 'ai' and ('核心目标' in content or '主要任务' in content or '本世代目标' in content):
-                task_goals.append(content.strip())
-            
-            # 提取关键决策
-            if msg_type == 'ai' and ('决定' in content or '选择' in content or '确定' in content or '确认' in content):
-                key_decisions.append(content.strip())
-            
-            if msg_type == 'tool':
-                # 提取工具名
-                if '[edit_local_file' in content:
-                    files_modified.append("edit_file")
-                elif '[check_syntax' in content:
-                    if 'OK' in content:
-                        summary_parts.append("语法检查通过")
-                    else:
-                        errors.append("语法错误")
-                elif 'web_search' in content or 'webpage' in content:
-                    tools_used.add("search")
-                elif 'read_local_file' in content:
-                    tools_used.add("read")
-            
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tools_used.add(tc.get('name', '')[:20])
+        # 回退到基于规则的摘要
+        return self._generate_rule_based_summary(messages, max_chars, reason)
+    
+    def _generate_llm_summary(
+        self,
+        messages: List[Any],
+        max_chars: int,
+        reason: str = "",
+    ) -> str:
+        """使用 LLM 生成摘要"""
+        from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+        from langchain_core.prompts import ChatPromptTemplate
         
-        # 构建摘要
-        # 根据压缩原因调整摘要重点
+        # 构建消息历史文本
+        history_text = self._format_messages_for_summary(messages)
+        
+        # 获取提示词模板
+        prompt_template = self._get_summary_prompt()
+        
+        # 构造提示词
+        prompt = prompt_template.format(max_chars=max_chars)
+        full_prompt = f"{prompt}\n\n## 对话历史\n\n{history_text}"
+        
         if reason:
-            summary_parts.append(f"压缩原因: {reason}")
+            full_prompt += f"\n\n## 压缩原因\n{reason}"
         
-        # 构建摘要 - 按重要性排序
-        if task_goals:
-            summary_parts.append(f"核心目标: {task_goals[-1][:100]}")
-        if key_decisions:
-            summary_parts.append(f"关键决策: {key_decisions[-1][:100]}")
-        if tools_used:
-            summary_parts.append(f"工具使用: {', '.join(list(tools_used)[:5])}")
-        if files_modified:
-            summary_parts.append(f"修改: {len(files_modified)} 个文件")
-        if errors:
-            summary_parts.append(f"错误: {errors[0][:100]}")
+        # 调用 LLM
+        response = self.compression_llm.invoke([
+            SystemMessage(content=full_prompt)
+        ])
         
-        result = " | ".join(summary_parts) if summary_parts else "多轮对话"
+        summary = response.content if hasattr(response, 'content') else str(response)
         
-        if len(result) > max_chars:
-            result = result[:max_chars - 3] + "..."
+        # 截断到最大长度
+        if len(summary) > max_chars:
+            summary = summary[:max_chars - 3] + "..."
         
-        return result
+        return summary
+    
+    def _format_messages_for_summary(self, messages: List[Any]) -> str:
+        """将消息列表格式化为摘要输入文本"""
+        lines = []
+        for i, msg in enumerate(messages):
+            msg_type = getattr(msg, 'type', 'unknown')
+            content = getattr(msg, 'content', str(msg))
+            
+            if msg_type == 'system':
+                lines.append(f"[系统] {content[:200]}...")
+            elif msg_type == 'human':
+                lines.append(f"[用户] {content[:300]}...")
+            elif msg_type == 'ai':
+                tool_calls = getattr(msg, 'tool_calls', None)
+                if tool_calls:
+                    for tc in tool_calls:
+                        name = tc.get('name', 'unknown')
+                        args = tc.get('args', {})
+                        lines.append(f"[AI 工具调用] {name}({args})")
+                else:
+                    lines.append(f"[AI] {content[:300]}...")
+            elif msg_type == 'tool':
+                lines.append(f"[工具结果] {content[:200]}...")
+            else:
+                lines.append(f"[{msg_type}] {content[:150]}...")
+        
+        return "\n".join(lines)
     
     def get_status_report(self, messages: List[Any] = None) -> Dict[str, Any]:
         """获取状态报告"""

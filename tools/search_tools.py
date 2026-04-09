@@ -60,7 +60,7 @@ def _should_process_file(file_path: Path) -> bool:
     return True
 
 
-def grep_search(
+def grep_search_tool(
     regex_pattern: str,
     include_ext: str = ".py",
     search_dir: str = ".",
@@ -84,6 +84,18 @@ def grep_search(
         return "[搜索] 错误: 正则表达式不能为空"
 
     search_dir_path = _normalize_path(search_dir)
+    
+    # 处理文件路径的情况：如果是文件而非目录，直接搜索该文件
+    is_single_file = False
+    target_filename = None
+    
+    if search_dir_path.exists() and search_dir_path.is_file():
+        # 用户传入的是文件路径，改为只搜索该文件
+        is_single_file = True
+        # 先保存文件名，再改变目录路径
+        target_filename = search_dir_path.name  # agent.py
+        search_dir_path = search_dir_path.parent  # 改为搜索其父目录
+    
     if not search_dir_path.exists():
         return f"[搜索] 错误: 目录不存在 - {search_dir_path}"
 
@@ -118,6 +130,10 @@ def grep_search(
 
                 # 检查扩展名
                 if extensions and file_path.suffix.lower() not in extensions:
+                    continue
+                
+                # 如果是单个文件模式，只处理目标文件
+                if target_filename and filename != target_filename:
                     continue
 
                 # 跳过包含 skip 路径的文件
@@ -157,17 +173,23 @@ def grep_search(
 
             if len(results) >= max_results:
                 break
+            
+            # 如果是单个文件模式，找到目标后就停止遍历
+            if target_filename and results:
+                break
 
     except Exception as e:
         return f"[搜索] 错误: 遍历目录时出错 - {e}"
 
     # 格式化输出
     if not results:
-        return f"[搜索] 未找到匹配项\n正则: {regex_pattern}\n目录: {search_dir_path}\n类型: {include_ext}"
+        # 如果是单个文件模式，显示正确的文件名
+        display_dir = f"{search_dir_path}/{target_filename}" if is_single_file else str(search_dir_path)
+        return f"[搜索] 未找到匹配项\n正则: {regex_pattern}\n目录: {display_dir}\n类型: {include_ext}"
 
     output_lines = [
         f"[搜索] 正则: {regex_pattern}",
-        f"[搜索] 目录: {search_dir_path}",
+        f"[搜索] 目录: {search_dir_path if not is_single_file else search_dir_path / target_filename}",
         f"[搜索] 类型: {include_ext}",
         f"[搜索] 找到 {len(results)} 个匹配\n",
         "=" * 80,
@@ -193,7 +215,7 @@ def grep_search(
     return '\n'.join(output_lines)
 
 
-def find_function_calls(
+def find_function_calls_tool(
     function_name: str,
     search_dir: str = ".",
     include_ext: str = ".py"
@@ -210,10 +232,10 @@ def find_function_calls(
         所有调用位置的列表
     """
     pattern = rf'\b{re.escape(function_name)}\s*\('
-    return grep_search(pattern, include_ext, search_dir)
+    return grep_search_tool(pattern, include_ext, search_dir)
 
 
-def find_definitions(
+def find_definitions_tool(
     symbol_name: str,
     search_dir: str = ".",
     include_ext: str = ".py"
@@ -236,10 +258,10 @@ def find_definitions(
         rf'\b{re.escape(symbol_name)}\s*=\s*(?!=)',
     ]
     combined_pattern = '|'.join(patterns)
-    return grep_search(combined_pattern, include_ext, search_dir)
+    return grep_search_tool(combined_pattern, include_ext, search_dir)
 
 
-def search_imports(
+def search_imports_tool(
     module_or_name: str,
     search_dir: str = ".",
     include_ext: str = ".py"
@@ -260,10 +282,10 @@ def search_imports(
         rf'^from\s+.*{re.escape(module_or_name)}\s+import',
     ]
     combined_pattern = '|'.join(patterns)
-    return grep_search(combined_pattern, include_ext, search_dir)
+    return grep_search_tool(combined_pattern, include_ext, search_dir)
 
 
-def search_and_read(
+def search_and_read_tool(
     query: str,
     context_lines: int = 5,
     include_ext: str = ".py",
@@ -407,8 +429,3 @@ def search_and_read(
 
     return '\n'.join(output)
 
-
-# 导出给 agent 使用的工具函数
-def create_grep_search_tool():
-    """创建可序列化的搜索工具函数"""
-    return grep_search
