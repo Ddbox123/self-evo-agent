@@ -56,10 +56,50 @@ enabled = true
 max_token_limit = 16000
 # 保留最近的工具调用次数（让模型知道自己最近在干嘛）
 keep_recent_steps = 2
-# 压缩摘要的最大字数
-summary_max_chars = 200
+# 压缩摘要的最大字数（兼容旧配置）
+summary_max_chars = 1000
 # 压缩用模型（建议用更轻量的模型以节省成本）
 compression_model = "qwen-32b-awq"
+
+# 压缩阈值配置
+[context_compression.thresholds]
+# 轻度压缩阈值（相对于 max_token_limit）
+light_threshold = 0.6
+# 标准压缩阈值
+standard_threshold = 0.8
+# 深度压缩阈值
+deep_threshold = 0.9
+# 紧急压缩阈值
+emergency_threshold = 0.95
+
+# 多级摘要配置
+[context_compression.summary]
+# 轻度压缩摘要字数
+light = 500
+# 标准压缩摘要字数
+standard = 1000
+# 深度压缩摘要字数
+deep = 2000
+# 紧急压缩摘要字数
+emergency = 3000
+
+# 智能保留策略
+[context_compression.preservation]
+# 保留最近 AI 消息数
+keep_ai_messages = 5
+# 保留工具调用结果
+keep_tool_results = true
+# 保留错误信息
+preserve_errors = true
+# 提取关键决策
+extract_key_decisions = true
+
+# 安全限制
+[context_compression.safety]
+# 每会话最大压缩次数
+max_compressions_per_session = 5
+# 压缩效率阈值（低于此值认为压缩无效）
+effectiveness_threshold = 0.3
 
 # ============================================================
 # 工具配置

@@ -159,18 +159,18 @@ class DebugLogger:
             print(f"\n--- {prefix} ---\n{content[:500]}\n---\n")
             return
         _ui.console.print()
-        _ui.console.print(f"[bold magenta]--- {prefix} ---[/bold magenta]")
+        _ui.console.print(f"[bold magenta]🦞 --- {prefix} ---[/bold magenta]")
         _ui.console.print(content[:500], style="dim")
-        _ui.console.print(f"[bold magenta]---[/bold magenta]")
+        _ui.console.print(f"[bold magenta]🦞 ---[/bold magenta]")
         _ui.console.print()
 
     def llm_thinking(self, content: str):
         """打印 LLM 的思考过程"""
         if _ui is None:
-            print(f"\n-- Thinking --\n{content[:500]}\n")
+            print(f"\n-- 🤔 Thinking --\n{content[:500]}\n")
             return
         _ui.console.print()
-        _ui.console.print("[bold magenta]-- Thinking --[/bold magenta]")
+        _ui.console.print("[bold magenta]🤔 --- Thinking ---[/bold magenta]")
         for line in content.split('\n')[:10]:
             if line.strip():
                 _ui.console.print(f"  {line[:100]}", style="dim")

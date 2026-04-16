@@ -462,32 +462,121 @@ class SelfEvolvingAgent:
         return tool_calls, thinking_content
 
     def _check_and_compress(self, messages: list, iteration: int) -> list:
-        """检查 Token 预算并在必要时压缩"""
+        """检查 Token 预算并在必要时压缩（增强版）"""
         current_tokens = estimate_messages_tokens(messages)
         max_budget = self.config.context_compression.max_token_limit
+
+        # 安全阈值
         preemptive_threshold = int(max_budget * 0.6)
         forced_threshold = int(max_budget * 0.8)
+        critical_threshold = int(max_budget * 0.9)
 
-        if current_tokens > forced_threshold:
-            _debug_logger.warning(f"[压缩] Token 过高 ({current_tokens}/{max_budget})，自动压缩", tag="TOKEN")
-            messages = self._compress_context(messages)
+        # 防止无限压缩：如果迭代次数过多，跳过压缩保护
+        if iteration > self.config.agent.max_iterations * 0.5:
+            _debug_logger.warning(f"[Token] 迭代过多 ({iteration})，跳过压缩", tag="TOKEN")
+            return messages
+
+        # 获取压缩计数
+        compression_count = getattr(self, '_compression_count', 0)
+        max_compressions = getattr(self.config.context_compression, 'max_compressions_per_session', 5)
+        if compression_count >= max_compressions:
+            _debug_logger.warning(f"[Token] 压缩次数已达上限 ({compression_count}/{max_compressions})，跳过", tag="TOKEN")
+            return messages
+
+        # 根据 Token 比例选择压缩级别
+        ratio = current_tokens / max_budget if max_budget > 0 else 0
+
+        if current_tokens > critical_threshold:
+            # 紧急压缩
+            _debug_logger.warning(f"[压缩-紧急] Token 危险 ({current_tokens}/{max_budget} = {ratio:.1%})", tag="TOKEN")
+            messages = self._compress_context(messages, level="emergency")
+        elif current_tokens > forced_threshold:
+            # 深度压缩
+            level = "deep" if compression_count < 2 else "standard"
+            _debug_logger.warning(f"[压缩-{level}] Token 过高 ({current_tokens}/{max_budget} = {ratio:.1%})", tag="TOKEN")
+            messages = self._compress_context(messages, level=level)
         elif current_tokens > preemptive_threshold and iteration > 1:
-            _debug_logger.info(f"[预压缩] Token 接近阈值 ({current_tokens}/{max_budget})，提前压缩", tag="TOKEN")
-            messages = self._compress_context(messages)
+            # 标准压缩
+            _debug_logger.info(f"[压缩-标准] Token 接近阈值 ({current_tokens}/{max_budget} = {ratio:.1%})", tag="TOKEN")
+            messages = self._compress_context(messages, level="standard")
+        elif current_tokens > preemptive_threshold * 0.8 and iteration > 1:
+            # 轻度压缩
+            _debug_logger.info(f"[压缩-轻度] Token 偏高 ({current_tokens}/{max_budget} = {ratio:.1%})", tag="TOKEN")
+            messages = self._compress_context(messages, level="light")
+        else:
+            # 不需要压缩
+            return messages
+
+        # 检查压缩是否有效
+        new_tokens = estimate_messages_tokens(messages)
+        if new_tokens >= current_tokens:
+            _debug_logger.warning(f"[Token] 压缩无效 ({current_tokens} -> {new_tokens})，回退原始", tag="TOKEN")
+            return messages
+
+        # 更新压缩计数
+        self._compression_count = compression_count + 1
+        _debug_logger.info(f"[Token] 压缩完成 ({current_tokens} -> {new_tokens})，节省 {current_tokens - new_tokens} Token", tag="TOKEN")
 
         return messages
 
-    def _compress_context(self, messages: list) -> list:
-        """压缩对话上下文"""
+    def _compress_context(self, messages: list, level: str = "standard") -> list:
+        """
+        压缩对话上下文（增强版）
+
+        Args:
+            messages: 消息列表
+            level: 压缩级别 ("light", "standard", "deep", "emergency")
+        """
         old_tokens = estimate_messages_tokens(messages)
-        compressed, _ = self.token_compressor.compress(
-            messages,
-            max_chars=self.config.context_compression.summary_max_chars,
-        )
-        new_tokens = estimate_messages_tokens(compressed)
-        self.logger.info(f"[Token压缩] {old_tokens} -> {new_tokens}")
-        logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
-        return compressed
+
+        # 根据压缩级别选择摘要字数
+        summary_chars_map = {
+            "light": getattr(self.config.context_compression, 'light_summary_chars', 500),
+            "standard": getattr(self.config.context_compression, 'standard_summary_chars', 1000),
+            "deep": getattr(self.config.context_compression, 'deep_summary_chars', 2000),
+            "emergency": 3000,
+        }
+        summary_chars = summary_chars_map.get(level, 1000)
+
+        # 如果 config 中有 summary_max_chars，也使用它
+        if hasattr(self.config.context_compression, 'summary_max_chars') and self.config.context_compression.summary_max_chars:
+            summary_chars = self.config.context_compression.summary_max_chars
+
+        try:
+            # 尝试使用压缩质量评估
+            from tools.compression_quality import get_compression_quality_evaluator
+            evaluator = get_compression_quality_evaluator()
+
+            compressed, _ = self.token_compressor.compress(
+                messages,
+                max_chars=summary_chars,
+            )
+            new_tokens = estimate_messages_tokens(compressed)
+
+            # 评估压缩质量
+            quality_report = evaluator.evaluate(
+                messages, compressed, old_tokens, new_tokens
+            )
+
+            # 记录压缩统计
+            self.logger.info(f"[Token压缩-{level}] {old_tokens} -> {new_tokens} (节省 {quality_report.saved_tokens})")
+            logger.log_compression(old_tokens, new_tokens, quality_report.saved_tokens)
+
+            # 保存原始消息用于可能的回退
+            self._last_messages = messages
+
+            return compressed
+
+        except ImportError:
+            # 如果没有质量评估器，回退到原有逻辑
+            compressed, _ = self.token_compressor.compress(
+                messages,
+                max_chars=summary_chars,
+            )
+            new_tokens = estimate_messages_tokens(compressed)
+            self.logger.info(f"[Token压缩] {old_tokens} -> {new_tokens}")
+            logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
+            return compressed
 
     def _execute_tool(self, tool_call: Dict, messages: list) -> tuple:
         """执行工具调用"""

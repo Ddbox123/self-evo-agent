@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(timeout 90 python -u agent.py --auto)"
+      "Bash(timeout 90 python -u agent.py --auto)",
+      "Bash(python stop_agent.py)",
+      "Bash(echo \"---Exit: $?---\")",
+      "Bash(python -u stop_agent.py)",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(python -c ' *)",
+      "Bash(timeout 5 python agent.py --auto)"
     ]
   }
 }

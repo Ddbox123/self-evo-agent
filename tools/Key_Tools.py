@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-LangChain 工具包装模块  
+LangChain 工具包装模块
 """
 from typing import List, Optional
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, tool
 from tools import *
-from langchain_core.tools import tool
+from tools.memory_tools import (
+    set_plan_tool as _set_plan_impl,
+    tick_subtask_tool as _tick_subtask_impl,
+    modify_task_tool as _modify_task_impl,
+    add_task_tool as _add_task_impl,
+    remove_task_tool as _remove_task_impl,
+)
 
 def create_key_tools() -> List[BaseTool]:
     """
@@ -241,7 +247,7 @@ def create_key_tools() -> List[BaseTool]:
         Returns:
             JSON 格式的执行结果，包含任务列表和当前状态
         """
-        return set_plan_tool(goal=goal, tasks=tasks)
+        return _set_plan_impl(goal=goal, tasks=tasks)
 
     @tool
     def tick_subtask_tool(task_id: int, summary: str) -> str:
@@ -254,7 +260,7 @@ def create_key_tools() -> List[BaseTool]:
             task_id: 任务编号
             summary: 该任务完成后的核心结论/成果
         """
-        return tick_subtask_tool(task_id=task_id, summary=summary)
+        return _tick_subtask_impl(task_id=task_id, summary=summary)
 
     @tool
     def modify_task_tool(task_id: int, description: str) -> str:
@@ -265,7 +271,7 @@ def create_key_tools() -> List[BaseTool]:
             task_id: 要修改的任务编号
             description: 新的任务描述
         """
-        return modify_task_tool(task_id=task_id, description=description)
+        return _modify_task_impl(task_id=task_id, new_description=description)
 
     @tool
     def add_task_tool(description: str) -> str:
@@ -275,7 +281,7 @@ def create_key_tools() -> List[BaseTool]:
         Args:
             description: 新任务的描述
         """
-        return add_task_tool(description=description)
+        return _add_task_impl(description=description)
 
     @tool
     def remove_task_tool(task_id: int) -> str:
@@ -285,7 +291,7 @@ def create_key_tools() -> List[BaseTool]:
         Args:
             task_id: 要删除的任务编号
         """
-        return remove_task_tool(task_id=task_id)
+        return _remove_task_impl(task_id=task_id)
     return [
         set_generation_task_tool,
         trigger_self_restart_tool,

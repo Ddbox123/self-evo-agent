@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-CLI UI 渲染引擎 - Claude Code 级终端界面
+CLI UI 渲染引擎 - 龙虾宝宝主题版
 
 基于 rich 库实现的动态终端界面，支持：
+- 龙虾宝宝可爱主题
 - 原地刷新的动态面板
 - 加载动画 (Spinner)
 - 带颜色的日志输出
@@ -30,36 +31,21 @@ from rich.box import Box, ROUNDED, DOUBLE
 from rich.align import Align
 from rich.text import Text
 
+# 龙虾主题
+from core.ascii_art import LobsterASCII, get_lobster_banner, get_status_lobster
+from core.theme import LobsterTheme, get_theme, get_style
+from core.pet_system import get_pet
+
 # 全局 Console 实例
 _console = Console(stderr=False, force_terminal=True)
-
-# 颜色定义
-class Colors:
-    """终端颜色常量"""
-    # 主色调
-    PRIMARY = "cyan"
-    SUCCESS = "green"
-    WARNING = "yellow"
-    ERROR = "red"
-    INFO = "blue"
-
-    # 特殊色
-    CODE = "bright_black"
-    HIGHLIGHT = "magenta"
-    PROMPT = "bold cyan"
-
-    # 状态色
-    THINKING = "bright_magenta"
-    SEARCHING = "bright_blue"
-    CODING = "bright_green"
-    TESTING = "bright_yellow"
 
 
 class UIManager:
     """
-    终端 UI 管理器
+    终端 UI 管理器 - 龙虾宝宝主题版
 
-    提供 Claude Code 级的终端渲染能力：
+    提供可爱的终端渲染能力：
+    - 龙虾宝宝 ASCII Art
     - 动态面板 (Live refresh)
     - 加载动画
     - 日志输出
@@ -95,36 +81,41 @@ class UIManager:
         self._tool_count = 0
         self._iterations = 0
 
+        # 龙虾主题
+        self.theme = get_theme()
+        self.style = get_style()
+        self.ascii = LobsterASCII()
+
+        # 龙虾宝宝宠物
+        self.pet = get_pet()
+
     def _create_header(self) -> Panel:
-        """创建状态头面板"""
-        status_colors = {
-            "IDLE": Colors.INFO,
-            "THINKING": Colors.THINKING,
-            "SEARCHING": Colors.SEARCHING,
-            "CODING": Colors.CODING,
-            "TESTING": Colors.WARNING,
-            "COMPRESSING": Colors.HIGHLIGHT,
-            "RESTARTING": Colors.ERROR,
-            "HIBERNATING": Colors.CODE,
-        }
-        status_color = status_colors.get(self._status, Colors.INFO)
+        """创建状态头面板 - 龙虾宝宝主题"""
+        status_color = self.theme.get_status_color(self._status)
+        status_icon = self.theme.get_status_icon(self._status)
+
+        # 龙虾 ASCII Art
+        lobster_art = get_status_lobster(self._status.lower())
 
         # 状态表格
         table = Table(box=None, show_header=False, padding=(0, 2))
         table.add_column(style="bold")
         table.add_column()
 
-        table.add_row("[bold cyan]GEN[/bold cyan]", f"[cyan]G{self._generation}[/cyan]")
-        table.add_row("[bold yellow]STATUS[/bold yellow]", f"[{status_color}]{self._status}[/{status_color}]")
-        table.add_row("[bold magenta]TURN[/bold magenta]", f"[magenta]#{self._iterations}[/magenta]")
-        table.add_row("[bold green]TOOLS[/bold green]", f"[green]{self._tool_count}[/green]")
+        table.add_row(f"[bold {self.theme.LOBSTER_CYAN}]GEN[/bold {self.theme.LOBSTER_CYAN}]", f"[{self.theme.LOBSTER_CYAN}]G{self._generation}[/{self.theme.LOBSTER_CYAN}]")
+        table.add_row(f"[bold {self.theme.LOBSTER_ORANGE}]STATUS[/bold {self.theme.LOBSTER_ORANGE}]", f"[{status_color}]{status_icon} {self._status}[/{status_color}]")
+        table.add_row(f"[bold {self.theme.LOBSTER_PINK}]TURN[/bold {self.theme.LOBSTER_PINK}]", f"[{self.theme.LOBSTER_PINK}]#{self._iterations}[/{self.theme.LOBSTER_PINK}]")
+        table.add_row(f"[bold {self.theme.LOBSTER_GREEN}]TOOLS[/bold {self.theme.LOBSTER_GREEN}]", f"[{self.theme.LOBSTER_GREEN}]{self._tool_count}[/{self.theme.LOBSTER_GREEN}]")
+
+        # 组合内容和龙虾 Art
+        content = f"[cyan]{lobster_art}[/cyan]\n{table}"
 
         return Panel(
-            table,
-            title="[bold cyan]Self-Evolving Agent[/bold cyan]",
-            border_style="cyan",
+            content,
+            title=self.style.status_title,
+            border_style=self.theme.LOBSTER_CYAN,
             box=ROUNDED,
-            width=50,
+            width=55,
         )
 
     def _create_task_board(self) -> Optional[Panel]:
@@ -134,19 +125,19 @@ class UIManager:
 
         return Panel(
             self._task_board,
-            title="[bold yellow]Task Board[/bold yellow]",
-            border_style="yellow",
+            title=f"[bold {self.theme.LOBSTER_ORANGE}]📋 任务清单[/bold {self.theme.LOBSTER_ORANGE}]",
+            border_style=self.theme.LOBSTER_ORANGE,
             box=ROUNDED,
             width=60,
         )
 
     def _create_log_panel(self) -> Panel:
-        """创建日志面板"""
+        """创建日志面板 - 龙虾主题"""
         if not self._logs:
             return Panel(
-                "[dim]等待日志...[/dim]",
-                title="[bold green]Execution Log[/bold green]",
-                border_style="green",
+                f"[dim]{get_status_lobster('happy')} 等待日志...[/dim]",
+                title=f"[bold {self.theme.LOBSTER_GREEN}]📝 执行日志[/bold {self.theme.LOBSTER_GREEN}]",
+                border_style=self.theme.LOBSTER_GREEN,
                 box=ROUNDED,
             )
 
@@ -156,18 +147,14 @@ class UIManager:
 
         return Panel(
             log_text,
-            title=f"[bold green]Execution Log[/bold green] ({len(self._logs)} entries)",
-            border_style="green",
+            title=f"[bold {self.theme.LOBSTER_GREEN}]📝 执行日志[/bold {self.theme.LOBSTER_GREEN}] ({len(self._logs)} entries)",
+            border_style=self.theme.LOBSTER_GREEN,
             box=ROUNDED,
         )
 
     def _create_full_renderable(self) -> Table:
         """创建完整的渲染布局"""
         layout = Table(box=None, show_header=False, padding=0)
-
-        # 左列：状态头
-        # 右列：任务清单
-        # 底部：日志面板
 
         left_panel = self._create_header()
         task_panel = self._create_task_board()
@@ -189,16 +176,6 @@ class UIManager:
     def live_display(self, refresh_per_second: int = 4):
         """
         启动 Live 刷新上下文
-
-        Args:
-            refresh_per_second: 每秒刷新次数
-
-        使用方式:
-            ui = UIManager()
-            with ui.live_display():
-                while True:
-                    ui.update_status(...)
-                    time.sleep(0.1)
         """
         self.start_live()
         try:
@@ -241,13 +218,6 @@ class UIManager:
     ):
         """
         更新状态
-
-        Args:
-            status: 状态名称
-            generation: 世代号
-            goal: 当前目标
-            iterations: 迭代次数
-            tool_count: 工具调用次数
         """
         self._status = status.upper()
         if generation is not None:
@@ -271,27 +241,17 @@ class UIManager:
         self._tool_count += 1
         self.refresh()
 
-    # ==================== 日志记录 ====================
+    # ==================== 日志记录 - 龙虾主题 ====================
 
     def add_log(self, message: str, level: str = "INFO"):
         """
-        添加日志条目
-
-        Args:
-            message: 日志消息
-            level: 日志级别 (INFO, WARN, ERROR, SUCCESS)
+        添加日志条目 - 龙虾宝宝主题版
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
-        level_colors = {
-            "INFO": Colors.INFO,
-            "WARN": Colors.WARNING,
-            "ERROR": Colors.ERROR,
-            "SUCCESS": Colors.SUCCESS,
-            "TOOL": Colors.CODING,
-            "LLM": Colors.THINKING,
-        }
-        color = level_colors.get(level.upper(), Colors.INFO)
-        log_entry = f"[{timestamp}] [bold {color}]{level}[/{color}] {message}"
+        icon = self.theme.get_log_icon(level.upper())
+        color = self.theme.get_log_color(level.upper())
+
+        log_entry = f"[dim]{timestamp}[/dim] {icon} [{color}]{level}[/{color}] {message}"
 
         self._logs.append(log_entry)
         if len(self._logs) > self._max_logs:
@@ -305,19 +265,10 @@ class UIManager:
     def thinking(self, message: str = "Thinking..."):
         """
         思考动画上下文
-
-        Args:
-            message: 思考状态描述
-
-        使用方式:
-            with ui.thinking("分析代码结构..."):
-                # 执行分析
-                pass
         """
         self._thinking = True
         self.add_log(message, "LLM")
 
-        # 创建临时状态
         original_status = self._status
         self._status = "THINKING"
         self.refresh()
@@ -329,37 +280,35 @@ class UIManager:
             self._status = original_status
             self.refresh()
 
-    # ==================== 独立输出方法 ====================
+    # ==================== 独立输出方法 - 龙虾主题 ====================
 
     def print_header(self, model: str, generation: int):
-        """打印会话头"""
+        """打印会话头 - 龙虾宝宝版"""
         self._generation = generation
 
-        banner = f"""
-╔══════════════════════════════════════════════════════════════════╗
-║                    Self-Evolving Agent                           ║
-║                    Terminal Edition v2.0                          ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Model: {model:<55} ║
-║  Generation: G{generation:<49} ║
-║  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S'):<49} ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-        self.console.print(banner, style="bold cyan")
+        banner = get_lobster_banner("虾宝", "v3.0")
+
+        header = f"""
+{banner}
+
+[cyan]模型:[/cyan] {model}
+[yellow]世代:[/yellow] G{generation}
+[green]时间:[/green] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        self.console.print(header)
 
     def print_thinking(self, message: str):
         """打印思考过程"""
-        with self.console.status(f"[bold magenta]Thinking...[/bold magenta] {message}") as status:
+        with self.console.status(f"[bold magenta]🤔 思考中...[/bold magenta] {message}") as status:
             yield status
 
     def print_tool_start(self, tool_name: str, args: Dict[str, Any] = None):
-        """打印工具调用开始"""
+        """打印工具调用开始 - 龙虾主题"""
         self.increment_tool_count()
-        self.add_log(f"Calling: {tool_name}", "TOOL")
+        tool_icon = self.theme.get_tool_icon(tool_name)
 
-        # 打印详细信息
         self.console.print()
-        self.console.print(f"[bold green]>{tool_name}[/bold green]", end="")
+        self.console.print(f"[bold magenta]🔧 {tool_icon} {tool_name}[/bold magenta]", end="")
 
         if args:
             args_str = ", ".join([f"{k}={str(v)[:30]}" for k, v in args.items()][:3])
@@ -368,35 +317,34 @@ class UIManager:
         self.console.print()
 
     def print_tool_result(self, tool_name: str, result: str, success: bool = True):
-        """打印工具执行结果"""
-        status = "[OK]" if success else "[FAIL]"
-        color = Colors.SUCCESS if success else Colors.ERROR
+        """打印工具执行结果 - 龙虾主题"""
+        status_icon = "✅" if success else "❌"
+        color = self.theme.LOBSTER_GREEN if success else self.theme.LOBSTER_RED
 
-        self.console.print(f"  {status} ", end="", style=color)
+        self.console.print(f"  {status_icon} ", end="", style=color)
         self.console.print(tool_name, style="bold")
 
-        # 截断长结果
         if result:
             preview = result[:500] + "..." if len(result) > 500 else result
             self.console.print(f"     {preview}", style="dim")
         self.console.print()
 
     def print_warning(self, message: str):
-        """打印警告"""
-        self.console.print(f"[bold yellow]WARNING[/bold yellow] {message}")
+        """打印警告 - 龙虾主题"""
+        self.console.print(f"[bold yellow]⚠️ 警告[/bold yellow] {message}")
         self.add_log(message, "WARN")
 
     def print_error(self, message: str, exc_info: str = None):
-        """打印错误"""
-        self.console.print(f"[bold red]ERROR[/bold red] {message}")
+        """打印错误 - 龙虾主题"""
+        self.console.print(f"[bold red]❌ 错误[/bold red] {message}")
         self.add_log(message, "ERROR")
 
         if exc_info:
             self.console.print(exc_info, style="red dim")
 
     def print_success(self, message: str):
-        """打印成功消息"""
-        self.console.print(f"[bold green]OK[/bold green] {message}")
+        """打印成功消息 - 龙虾主题"""
+        self.console.print(f"[bold green]✅ 成功[/bold green] {message}")
         self.add_log(message, "SUCCESS")
 
     def print_section(self, title: str):
@@ -433,31 +381,19 @@ class UIManager:
 
     def print_task_checklist(self, tasks: List[Dict[str, Any]]):
         """
-        打印任务清单
-
-        Args:
-            tasks: 任务列表，每个任务包含:
-                   - title: 任务标题
-                   - done: 是否完成
-                   - priority: 优先级 (high/medium/low)
+        打印任务清单 - 龙虾主题
         """
-        tree = Tree("[bold yellow]Task Board[/bold yellow]")
-
-        priority_colors = {
-            "high": Colors.ERROR,
-            "medium": Colors.WARNING,
-            "low": Colors.INFO,
-        }
+        tree = Tree(f"[bold yellow]📋 任务清单[/bold yellow]")
 
         for task in tasks:
             title = task.get("title", "")
             done = task.get("done", False)
             priority = task.get("priority", "medium")
 
-            icon = "[bold green]x[/bold green]" if done else "[ ]"
-            color = priority_colors.get(priority, Colors.INFO)
+            icon = "[bold green]✓[/bold green]" if done else "[ ]"
+            priority_color = self.theme.LOBSTER_RED if priority == "high" else (self.theme.LOBSTER_ORANGE if priority == "medium" else "cyan")
 
-            tree.add(f"{icon} [bold {color}]{title}[/{color}]")
+            tree.add(f"{icon} [bold {priority_color}]{title}[/{priority_color}]")
 
         self.console.print(tree)
 
@@ -466,10 +402,74 @@ class UIManager:
         bar_length = 30
         percent = completed / total if total > 0 else 0
         filled = int(bar_length * percent)
-        bar = "[green]" + "=" * filled + "[/green]" + "-" * (bar_length - filled)
+        bar = f"[{self.theme.LOBSTER_GREEN}]" + "=" * filled + "[/]" + "-" * (bar_length - filled)
 
         self.console.print(f"  {description}")
         self.console.print(f"  [{bar}] {int(percent * 100)}%")
+
+    def print_lobster_status(self, status: str = "happy", message: str = ""):
+        """
+        打印龙虾宝宝状态面板
+
+        Args:
+            status: 状态 (happy, thinking, working, sleeping, sad)
+            message: 状态消息
+        """
+        lobster_art = get_status_lobster(status)
+        status_icon = self.theme.get_status_icon(status.upper())
+
+        content = f"[cyan]{lobster_art}[/cyan]\n"
+        content += f"[bold cyan]状态:[/bold cyan] {status_icon} {status.upper()}\n"
+        if message:
+            content += f"[cyan]消息:[/cyan] {message}"
+
+        panel = Panel(
+            content,
+            title=self.style.status_title,
+            border_style=self.theme.LOBSTER_CYAN,
+            box=ROUNDED,
+        )
+        self.console.print(panel)
+
+    def print_pet_status(self):
+        """打印龙虾宝宝宠物状态"""
+        pet_text = self.pet.get_full_status()
+        panel = Panel(
+            pet_text,
+            title="[bold magenta]🦞 龙虾宝宝[/bold magenta]",
+            border_style="bright_magenta",
+            box=ROUNDED,
+        )
+        self.console.print(panel)
+
+    def print_welcome_panel(self):
+        """打印欢迎面板 - 龙虾宝宝版"""
+        lobster = LobsterASCII.HAPPY
+
+        welcome = Panel(
+            f"""{lobster}
+
+[bold bright_red]🦞 欢迎回来，龙虾爸爸！🦞[/bold bright_red]
+
+[green]我是你的小虾宝，已经准备好为你服务啦~[/green]
+
+[cyan]📊 当前状态:[/cyan]
+  • 世代: G{self._generation}
+  • 目标: {self._current_goal[:30] if self._current_goal else '等待任务...'}
+  • 状态: {self.theme.get_status_icon(self._status)} {self._status}
+
+[yellow]🎯 快速开始:[/yellow]
+  1. 直接输入任务，虾宝会帮你完成
+  2. 输入 /help 查看所有命令
+  3. 输入 /status 查看我的状态
+
+[dim]💡 提示: 按 Ctrl+C 可以随时中断[/dim]
+            """,
+            title="[bold bright_red]🦞 虾宝已就绪[/bold bright_red]",
+            border_style="bright_cyan",
+            box=ROUNDED,
+        )
+        self.console.print(welcome)
 
     def clear(self):
         """清屏"""
@@ -542,3 +542,18 @@ def ui_update_status(
 def ui_task_board(markdown: str):
     """设置任务清单"""
     get_ui().set_task_board(markdown)
+
+
+def ui_lobster_status(status: str = "happy", message: str = ""):
+    """打印龙虾状态"""
+    get_ui().print_lobster_status(status, message)
+
+
+def ui_welcome():
+    """打印欢迎面板"""
+    get_ui().print_welcome_panel()
+
+
+def ui_print_welcome():
+    """打印欢迎面板（别名）"""
+    get_ui().print_welcome_panel()

@@ -52,6 +52,10 @@ COMPRESSION_TARGET_RATIO = 0.45    # 压缩后应达到 45%
 MINIMAL_SUMMARY_CHARS = 80        # 极简摘要最大字符数
 CORE_SUMMARY_CHARS = 200          # 核心摘要最大字符数（优化）
 DETAILED_SUMMARY_CHARS = 500      # 详细摘要最大字符数
+# 新增：动态摘要配置
+LIGHT_SUMMARY_CHARS = 500         # 轻度压缩摘要字数
+STANDARD_SUMMARY_CHARS = 1000    # 标准压缩摘要字数
+DEEP_SUMMARY_CHARS = 2000        # 深度压缩摘要字数
 
 # 截断配置
 MAX_AI_RESPONSE_CHARS = 300      # AI 响应最大字符数
@@ -574,23 +578,86 @@ class EnhancedTokenCompressor:
     ) -> str:
         """
         生成摘要。
-        
+
         如果配置了 compression_llm，则使用 LLM 生成摘要；
         否则回退到基于规则的摘要生成。
         """
         if not messages:
             return ""
-        
+
         # 如果有 LLM，尝试用 LLM 生成摘要
         if self.compression_llm:
             try:
                 return self._generate_llm_summary(messages, max_chars, reason)
             except Exception as e:
                 logging.warning(f"LLM 摘要生成失败，回退到规则摘要: {e}")
-                return self._generate_rule_based_summary(messages, max_chars, reason)
-        
+                return self._rule_based_summary(messages, max_chars)
+
         # 回退到基于规则的摘要
-        return self._generate_rule_based_summary(messages, max_chars, reason)
+        return self._rule_based_summary(messages, max_chars)
+
+    def _rule_based_summary(self, messages: List[Any], max_chars: int) -> str:
+        """基于规则的简单摘要生成（增强版：集成关键信息提取）"""
+        if not messages:
+            return ""
+
+        # 尝试导入并使用关键信息提取器
+        try:
+            from tools.key_info_extractor import get_key_info_extractor
+            extractor = get_key_info_extractor()
+            key_info_summary = extractor.extract_key_info_summary(messages)
+            if key_info_summary:
+                # 关键信息摘要
+                summary = key_info_summary
+                if len(summary) <= max_chars:
+                    return summary
+        except ImportError:
+            pass
+
+        # 回退到原有的摘要生成逻辑
+        summary_parts = []
+        remaining = max_chars - 50  # 留空间给前缀和省略号
+
+        # 收集工具调用
+        tool_calls = []
+        for msg in messages:
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    name = tc.get('name', 'unknown')
+                    tool_calls.append(name)
+
+        if tool_calls:
+            unique_tools = list(dict.fromkeys(tool_calls))[:10]  # 去重，最多10个
+            summary_parts.append(f"使用的工具: {', '.join(unique_tools)}")
+
+        # 收集用户消息
+        user_msgs = []
+        for msg in messages:
+            if hasattr(msg, 'type') and msg.type == 'human':
+                content = getattr(msg, 'content', '')[:100]
+                if content:
+                    user_msgs.append(content)
+
+        if user_msgs:
+            summary_parts.append(f"用户目标: {user_msgs[-1][:80]}")
+
+        # 收集 AI 消息
+        ai_contents = []
+        for msg in messages:
+            if hasattr(msg, 'type') and msg.type == 'ai':
+                content = getattr(msg, 'content', '')
+                if content and not hasattr(msg, 'tool_calls'):
+                    ai_contents.append(content[:80])
+
+        if ai_contents:
+            summary_parts.append(f"AI响应数: {len(ai_contents)}")
+
+        # 组合摘要
+        summary = " | ".join(summary_parts)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars - 3] + "..."
+
+        return summary
     
     def _generate_llm_summary(
         self,
