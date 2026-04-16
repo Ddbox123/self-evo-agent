@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-自我进化 Agent - 主入口文件
-
-该项目实现了一个能够自我进化的 AI Agent，基于 LangChain 框架构建，
-使用 ReAct 风格的 Agent 架构。
-
-架构说明：
-- Agent 运行主逻辑循环
-- 需要重启时，通过脱离父进程的方式唤起 core/restarter.py
-- Agent 自我了结后，restarter 等待原进程死亡，重新拉起新 Agent 进程
-
-重构说明：
-- 日志系统已迁移到 core/logger.py
-- 状态管理已迁移到 core/state.py
-- 事件总线已迁移到 core/event_bus.py
-- 使用事件驱动架构解耦工具调用
-"""
 
 from __future__ import annotations
 
@@ -24,7 +7,7 @@ import sys
 import time
 import logging
 import traceback
-import threading
+import httpx
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable
 
@@ -56,6 +39,9 @@ from core.event_bus import EventBus, get_event_bus, EventNames, Event
 # 导入状态管理
 from core.state import AgentState, get_state_manager
 
+# 导入安全模块（新）
+from core.security import get_security_validator, SecurityValidator
+
 # LangChain 核心组件
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -64,12 +50,12 @@ from langchain_openai import ChatOpenAI
 from tools import Key_Tools
 from tools.token_manager import EnhancedTokenCompressor, estimate_messages_tokens
 from tools.memory_tools import (
-    get_generation_tool, get_core_context, get_current_goal,
+    get_generation_tool, get_core_context_tool, get_current_goal_tool,
+    get_core_context, get_current_goal,  # 向后兼容别名
     archive_generation_history, advance_generation,
     _load_memory, clear_generation_task,
     read_dynamic_prompt_tool, update_generation_task_tool, add_insight_to_dynamic_tool,
 )
-from tools.task_tools import check_restart_block
 from tools.rebirth_tools import trigger_self_restart_tool
 
 # 导入 CLI UI
@@ -80,105 +66,45 @@ from core.prompt_builder import build_system_prompt
 
 
 # ============================================================================
-# 工具执行器 - 通过事件总线解耦
+# 导入工具执行器（从核心模块解耦）
 # ============================================================================
+from core.tool_executor import get_tool_executor
 
-class ToolExecutor:
-    """
-    工具执行器
+# ============================================================================
+# 导入 Phase 6 模块（自主决策优化）
+# ============================================================================
+from core.decision_tree import (
+    DecisionTree, DecisionContext, DecisionType,
+    get_decision_tree, create_default_decision_tree,
+)
+from core.priority_optimizer import (
+    PriorityOptimizer, Task, PriorityScore,
+    get_priority_optimizer,
+)
+from core.strategy_selector import (
+    StrategySelector, Strategy, StrategyType,
+    get_strategy_selector, create_default_selector,
+)
 
-    负责：
-    - 管理工具函数映射
-    - 通过事件总线解耦工具执行
-    - 提供工具超时和重试机制
-    """
-
-    def __init__(self):
-        self._tool_map: Dict[str, Callable] = {}
-        self._timeout_map: Dict[str, int] = {}
-        self._retryable_tools: set = set()
-        self._event_bus = get_event_bus()
-        self._register_default_tools()
-
-    def _register_default_tools(self):
-        """注册默认工具映射"""
-        from tools.tool_list import (
-            build_tool_map_with_suffix,
-            TOOL_TIMEOUT_MAP,
-            RETRYABLE_TOOLS,
-        )
-
-        # 使用统一工具映射
-        self._tool_map = build_tool_map_with_suffix()
-        self._timeout_map = TOOL_TIMEOUT_MAP
-        self._retryable_tools = RETRYABLE_TOOLS
-
-    def register_tool(self, name: str, func: Callable, timeout: int = 30):
-        """注册自定义工具"""
-        self._tool_map[name] = func
-        self._timeout_map[name] = timeout
-
-    def execute(self, tool_name: str, tool_args: dict) -> tuple:
-        """
-        执行工具
-
-        Returns:
-            (result, action): 元组
-        """
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
-
-        # 发布工具开始事件
-        self._event_bus.publish(EventNames.TOOL_START, {
-            "name": tool_name,
-            "args": tool_args,
-        })
-
-        if tool_name not in self._tool_map:
-            return (f"[错误] 未知工具 {tool_name}", None)
-
-        func = self._tool_map[tool_name]
-        timeout = self._timeout_map.get(tool_name, 30)
-
-        try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(func, **tool_args)
-                result = future.result(timeout=timeout)
-
-            # 发布工具成功事件
-            self._event_bus.publish(EventNames.TOOL_SUCCESS, {
-                "name": tool_name,
-                "result": str(result)[:200],
-            })
-
-            return (result, None)
-
-        except TimeoutError:
-            error_msg = f"[超时] {tool_name} 执行超时 ({timeout}秒)"
-            self._event_bus.publish(EventNames.TOOL_ERROR, {
-                "name": tool_name,
-                "error": error_msg,
-            })
-            return (error_msg, None)
-
-        except Exception as e:
-            error_msg = f"[错误] {type(e).__name__}: {e}"
-            self._event_bus.publish(EventNames.TOOL_ERROR, {
-                "name": tool_name,
-                "error": error_msg,
-            })
-            return (error_msg, None)
-
-
-# 全局工具执行器
-_tool_executor: Optional[ToolExecutor] = None
-
-
-def get_tool_executor() -> ToolExecutor:
-    """获取工具执行器单例"""
-    global _tool_executor
-    if _tool_executor is None:
-        _tool_executor = ToolExecutor()
-    return _tool_executor
+# ============================================================================
+# 导入 Phase 7 模块（模块化重构）
+# ============================================================================
+from core.llm_orchestrator import (
+    LLMOrchestrator, LLMConfig, LLMResponse, LLMCallOptions,
+    get_llm_orchestrator,
+)
+from core.tool_registry import (
+    ToolRegistry, ToolMetadata, ToolCategory, ToolRegistration,
+    get_tool_registry,
+)
+from core.memory_manager import (
+    MemoryManager, ShortTermMemory, MidTermMemory, LongTermMemory,
+    get_memory_manager, reset_memory_manager,
+)
+from core.task_planner import (
+    TaskPlanner, Task as PlannerTask, TaskStatus, TaskPriority, RiskLevel,
+    get_task_planner,
+)
 
 
 # ============================================================================
@@ -219,14 +145,25 @@ class SelfEvolvingAgent:
         }
         if self.config.llm.api_base:
             llm_kwargs["base_url"] = self.config.llm.api_base
-        llm_kwargs["timeout"] = getattr(self.config.llm, 'api_timeout', 120)
-        llm_kwargs["request_timeout"] = llm_kwargs["timeout"]
+
+        # 超时设置：httpx.Timeout(total, connect)
+        api_timeout = getattr(self.config.llm, 'api_timeout', 600)
+        llm_kwargs["timeout"] = httpx.Timeout(api_timeout, connect=30)
 
         self.llm = ChatOpenAI(**llm_kwargs)
         self.model_name = self.config.llm.model_name
 
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.key_tools)
+
+        # 测试 LLM 连接
+        _debug_logger.info("正在测试 LLM 连接...", tag="LLM")
+        try:
+            test_response = self.llm.invoke("你好，请回复 OK")
+            _debug_logger.success(f"LLM 连接测试成功: {test_response.content[:50]}...", tag="LLM")
+        except Exception as e:
+            _debug_logger.error(f"LLM 连接测试失败: {type(e).__name__}: {e}", tag="LLM")
+            raise RuntimeError(f"LLM 连接失败，请检查 API 配置: {e}")
 
         # 创建压缩用 LLM
         compression_llm_kwargs = {
@@ -236,8 +173,9 @@ class SelfEvolvingAgent:
         }
         if self.config.llm.api_base:
             compression_llm_kwargs["base_url"] = self.config.llm.api_base
-        compression_llm_kwargs["timeout"] = getattr(self.config.llm, 'api_timeout', 120)
-        compression_llm_kwargs["request_timeout"] = compression_llm_kwargs["timeout"]
+
+        compression_llm_kwargs["timeout"] = httpx.Timeout(api_timeout, connect=30)
+
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
 
         # Token 压缩器
@@ -270,6 +208,52 @@ class SelfEvolvingAgent:
         self.state_manager = get_state_manager()
         self.event_bus = get_event_bus()
         self.tool_executor = get_tool_executor()
+        
+        # 初始化安全验证器（新）
+        self.security_validator = get_security_validator(project_root)
+        
+        # =========================================================================
+        # 初始化 Phase 6 模块（自主决策优化）
+        # =========================================================================
+        self.decision_tree = get_decision_tree(project_root)
+        self.priority_optimizer = get_priority_optimizer(project_root)
+        self.strategy_selector = get_strategy_selector(project_root)
+
+        # 如果单例为空，创建默认配置
+        if not self.decision_tree._nodes:
+            self.decision_tree.load_from_config(create_default_decision_tree().to_config())
+        if not self.strategy_selector._strategies:
+            default_selector = create_default_selector()
+            for s in default_selector._strategies.values():
+                self.strategy_selector.add_strategy(s)
+
+        # =========================================================================
+        # 初始化 Phase 7 模块（模块化重构）
+        # =========================================================================
+        # LLM Orchestrator（可选，如果可用则使用）
+        try:
+            self.llm_orchestrator = get_llm_orchestrator()
+        except Exception:
+            self.llm_orchestrator = None
+
+        # Tool Registry（可选，如果可用则使用）
+        try:
+            self.tool_registry = get_tool_registry(project_root)
+        except Exception:
+            self.tool_registry = None
+
+        # Memory Manager（可选，如果可用则使用）
+        try:
+            self.memory_manager = get_memory_manager(project_root)
+        except Exception:
+            self.memory_manager = None
+
+        # Task Planner（可选，如果可用则使用）
+        try:
+            self.task_planner = get_task_planner(project_root)
+        except Exception:
+            self.task_planner = None
+
         self._system_prompt_written = False
         self._setup_event_handlers()
 
@@ -338,6 +322,16 @@ class SelfEvolvingAgent:
         max_iterations = self.config.agent.max_iterations
 
         try:
+            # Phase 6: 在开始循环前进行决策
+            decision_context = self._build_decision_context(user_prompt)
+            decision_result = None
+            if hasattr(self, 'decision_tree'):
+                decision_result = self.decision_tree.make_decision(decision_context)
+                if decision_result and decision_result.selected_action != "no_decision":
+                    _debug_logger.debug(
+                        f"[决策] {decision_result.selected_action}: {decision_result.reasoning}", tag="DECISION"
+                    )
+
             for iteration in range(1, max_iterations + 1):
                 # 自动 Token 检查与压缩
                 messages = self._check_and_compress(messages, iteration)
@@ -345,6 +339,10 @@ class SelfEvolvingAgent:
                 # 第一次循环打印会话开始
                 if iteration == 1:
                     _debug_logger.session_start(self.model_name, get_generation_tool())
+
+                # Phase 6: 动态调整迭代策略
+                if decision_result and hasattr(self, 'strategy_selector'):
+                    self._apply_strategy_adjustments(decision_result)
 
                 # 调用 LLM
                 response = self._invoke_llm(messages)
@@ -378,6 +376,10 @@ class SelfEvolvingAgent:
                         _debug_logger.llm_response(response.content, "LLM 最终回复")
                         logger.log_llm_intent("final_response", response.content[:300])
                     return True
+
+                # Phase 6: 使用优先级优化器排序工具
+                if hasattr(self, 'priority_optimizer'):
+                    tool_calls = self._optimize_tool_order(tool_calls)
 
                 # 执行工具
                 for tool_call in tool_calls:
@@ -496,6 +498,17 @@ class SelfEvolvingAgent:
         _debug_logger.tool_start(tool_name, tool_args)
         logger.log_tool_call(tool_name, tool_args, status="called")
 
+        # Phase 6: 使用策略选择器选择执行策略
+        start_time = datetime.now()
+        strategy_selection = None
+        if hasattr(self, 'strategy_selector'):
+            context = self._build_strategy_context(tool_name, tool_args)
+            strategy_selection = self.strategy_selector.select(context)
+            if strategy_selection and strategy_selection.selected_strategy:
+                _debug_logger.debug(
+                    f"[策略] 选择策略: {strategy_selection.selected_strategy.name}", tag="STRATEGY"
+                )
+
         # 特殊工具处理
         if tool_name == "compress_context":
             old_tokens = estimate_messages_tokens(messages)
@@ -523,6 +536,20 @@ class SelfEvolvingAgent:
         else:
             _debug_logger.warning(f"[警告] {tool_name} 返回 None", tag="TOOL")
 
+        # Phase 6: 记录策略执行结果
+        if strategy_selection and hasattr(self, 'strategy_selector'):
+            from core.strategy_selector import StrategyResult
+            duration = (datetime.now() - start_time).total_seconds()
+            success = result is not None and "error" not in str(result).lower()
+            strategy_result = StrategyResult(
+                strategy_id=strategy_selection.selected_strategy.strategy_id,
+                success=success,
+                outcome=result,
+                metrics={"duration": duration},
+                duration=duration,
+            )
+            self.strategy_selector.record_result(strategy_result)
+
         # 标记自修改
         if tool_name in ("edit_local_file", "create_new_file"):
             file_path = tool_args.get("file_path", "")
@@ -531,6 +558,91 @@ class SelfEvolvingAgent:
                 _debug_logger.success("agent.py 已修改，将触发重启", tag="MODIFY")
 
         return (result, None)
+
+    def _build_strategy_context(self, tool_name: str, tool_args: Dict) -> Dict:
+        """构建策略选择的上下文"""
+        context = {
+            "tool_name": tool_name,
+            "task_type": self._classify_task_type(tool_name),
+            "exploration_mode": getattr(self.config.agent, 'exploration_mode', False),
+            "generation": get_generation_tool(),
+        }
+        return context
+
+    def _classify_task_type(self, tool_name: str) -> str:
+        """分类任务类型"""
+        task_categories = {
+            "code_read": ["read_local_file", "grep_search", "grep_file"],
+            "code_write": ["edit_local_file", "create_new_file", "create_file"],
+            "code_analysis": ["analyze_code", "get_code_structure", "get_function_structure"],
+            "search": ["web_search", "search_code", "grep_search"],
+            "memory": ["read_memory", "write_memory", "read_dynamic_prompt"],
+            "task": ["set_plan", "set_generation_task", "tick_subtask"],
+            "system": ["trigger_self_restart_tool", "compress_context", "enter_hibernation"],
+        }
+        for category, tools in task_categories.items():
+            if tool_name in tools:
+                return category
+        return "general"
+
+    def _build_decision_context(self, user_prompt: str) -> "DecisionContext":
+        """构建决策上下文"""
+        from core.decision_tree import DecisionContext
+        state = {
+            "user_prompt": user_prompt,
+            "generation": get_generation_tool(),
+            "has_task": bool(get_current_goal()),
+            "iteration": 1,
+            "exploration_mode": getattr(self.config.agent, 'exploration_mode', False),
+        }
+        history = self.global_recent_actions[-10:] if hasattr(self, 'global_recent_actions') else []
+        return DecisionContext(state=state, history=history)
+
+    def _apply_strategy_adjustments(self, decision_result) -> None:
+        """根据决策结果调整策略"""
+        if not decision_result:
+            return
+        action = decision_result.selected_action
+        if "探索" in action or "explore" in action.lower():
+            if hasattr(self.strategy_selector, '_config'):
+                self.strategy_selector._config["exploration_rate"] = 0.4
+        elif "利用" in action or "exploit" in action.lower():
+            if hasattr(self.strategy_selector, '_config'):
+                self.strategy_selector._config["exploration_rate"] = 0.1
+
+    def _optimize_tool_order(self, tool_calls: List[Dict]) -> List[Dict]:
+        """使用优先级优化器调整工具执行顺序"""
+        if not tool_calls or not hasattr(self, 'priority_optimizer'):
+            return tool_calls
+
+        tasks = []
+        for i, tc in enumerate(tool_calls):
+            tool_name = tc.get('name', 'unknown')
+            task_id = f"tool_{i}_{tool_name}"
+            task = Task(
+                task_id=task_id,
+                name=f"{tool_name}",
+                description=f"工具调用: {tool_name}",
+                priority=0.5,
+                estimated_time=0.1,
+                metadata={"type": self._classify_task_type(tool_name)},
+            )
+            self.priority_optimizer.add_task(task)
+            tasks.append((tc, task_id))
+
+        # 优化任务顺序
+        result = self.priority_optimizer.optimize(context={"tool_count": len(tool_calls)})
+        task_order = result.task_order
+
+        # 根据优化结果重新排序
+        order_map = {tid: i for i, tid in enumerate(task_order)}
+        sorted_calls = sorted(
+            tool_calls,
+            key=lambda tc: order_map.get(f"tool_{[i for i, (c, tid) in enumerate(tasks) if c == tc][0]}_{tc.get('name')}", 999)
+            if any(c == tc for _, tid in tasks for i, (c, tid2) in enumerate(tasks) if tid == tid2)
+            else 999
+        )
+        return sorted_calls
 
     def _handle_tool_result(self, tool_call: Dict, result, action, messages: list):
         """处理工具执行结果"""
@@ -827,7 +939,7 @@ def main(initial_prompt: str = None):
             sys.exit(1)
 
         agent = SelfEvolvingAgent(config=config)
-        ui.console.print(f"  [green]Tools:[/green]   {len(agent.tools)} loaded")
+        ui.console.print(f"  [green]Key Tools:[/green]   {len(agent.key_tools)} loaded")
         ui.console.print("[dim]─" * 60 + "[/dim]")
         ui.console.print()
 

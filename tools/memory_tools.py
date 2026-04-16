@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
 """
-层级化记忆模块 - 跨生命周期状态管理
+记忆与任务管理模块 - 跨生命周期状态管理
 
-采用"层级记忆"机制：
-1. 世代索引 (memory.json) - 保留当前世代号、核心智慧摘要、当前目标
-2. 世代档案 (archives/gen_{N}_history.json) - 完整保留每一世代的对话记录和思考过程
+整合了记忆管理和任务管理功能：
 
-存储位置 (统一在 workspace/ 下):
-- workspace/memory/memory.json - 世代索引
-- workspace/memory/archives/ - 世代详细档案
-- workspace/prompts/DYNAMIC.md - 动态提示词
+【记忆管理】
+- 世代索引 (memory.json) - 保留当前世代号、核心智慧摘要、当前目标
+- 世代档案 (archives/gen_{N}_history.json) - 完整保留每一世代的对话记录和思考过程
+
+【任务管理】
+- set_plan / tick_subtask - 任务清单驱动执行
+- 重启前强制检查任务完成度
 
 设计原则：详细档案只在 Agent 主动读取时才加载，不增加常规运行的 Token 负担。
 """
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 # 导入统一工作区管理器
 from core.workspace_manager import get_workspace
+from core.task_manager import get_task_manager
 
+
+# ============================================================================
+# 记忆管理工具
+# ============================================================================
 
 def _get_memory_index_path() -> str:
     """获取记忆索引文件路径"""
@@ -110,7 +117,6 @@ def _save_memory(memory: dict) -> bool:
         return False
 
 
-
 def read_memory_tool() -> str:
     """
     读取当前的世代索引（轻量级，不加载详细档案）。
@@ -153,14 +159,19 @@ def get_generation_tool() -> int:
     return _load_memory().get("current_generation", 1)
 
 
-def get_current_goal() -> str:
+def get_current_goal_tool() -> str:
     """获取当前目标"""
     return _load_memory().get("current_goal", "")
 
 
-def get_core_context() -> str:
-    """获取核心上下文（兼容旧接口）"""
+def get_core_context_tool() -> str:
+    """获取核心上下文"""
     return _load_memory().get("core_wisdom", "")
+
+
+# 向后兼容别名 (agent.py 等旧代码使用这些无后缀名称)
+get_current_goal = get_current_goal_tool
+get_core_context = get_core_context_tool
 
 
 def archive_generation_history(
@@ -183,7 +194,6 @@ def archive_generation_history(
     """
     archives_path = _get_archives_path()
     
-    # 构建世代档案
     archive = {
         "generation": generation,
         "archived_at": datetime.now().isoformat(),
@@ -193,7 +203,6 @@ def archive_generation_history(
         "history": history_data,
     }
     
-    # 文件名格式: gen_{N}_history.json
     filename = f"gen_{generation}_history.json"
     filepath = os.path.join(archives_path, filename)
     
@@ -285,7 +294,7 @@ def list_archives_tool() -> str:
 
 def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
     """
-    更新记忆索引（世代号递增由 archive_generation_history 处理）。
+    更新记忆索引。
     
     【极度重要】在调用 trigger_self_restart 之前必须调用此函数！
     会更新 core_wisdom 和 current_goal，世代号由归档操作递增。
@@ -297,7 +306,6 @@ def commit_compressed_memory_tool(new_core_context: str, next_goal: str) -> str:
     Returns:
         更新后的JSON字符串，包含状态和世代信息
     """
-    # 强制截断到300字
     if len(new_core_context) > 300:
         new_core_context = new_core_context[:297] + "..."
     
@@ -326,9 +334,6 @@ def force_save_current_state(core_wisdom: str = "", next_goal: str = "", generat
     """
     【强制记忆快照】在重启前自动调用，确保记忆被保存。
 
-    此函数作为最后一道防线，确保即使 Agent 没有主动调用 commit_compressed_memory，
-    在触发重启时系统也会自动保存当前状态。
-
     Args:
         core_wisdom: 核心智慧摘要（可选，如果为空则保留原有值）
         next_goal: 下一世代目标（可选，如果为空则保留原有值）
@@ -343,7 +348,6 @@ def force_save_current_state(core_wisdom: str = "", next_goal: str = "", generat
     try:
         memory = _load_memory()
 
-        # 如果没有提供新值，保留原有值
         if not core_wisdom:
             core_wisdom = memory.get("core_wisdom", "无")
         if not next_goal:
@@ -351,11 +355,9 @@ def force_save_current_state(core_wisdom: str = "", next_goal: str = "", generat
         if generation is None:
             generation = memory.get("current_generation", 1)
 
-        # 强制截断
         if len(core_wisdom) > 300:
             core_wisdom = core_wisdom[:297] + "..."
 
-        # 更新记忆
         memory["core_wisdom"] = core_wisdom
         memory["current_goal"] = next_goal
         memory["current_generation"] = generation
@@ -400,7 +402,7 @@ def advance_generation() -> int:
 
 
 # ============================================================================
-# 动态提示词管理
+# 动态提示词管理工具
 # ============================================================================
 
 def read_dynamic_prompt_tool() -> str:
@@ -423,9 +425,6 @@ def update_generation_task_tool(task: str) -> str:
     """
     更新当前世代的任务到动态提示词区域。
     
-    模型在每个世代开始时调用此函数，将自己制定的任务写入系统提示词。
-    该任务在整个世代中有效，直到下个世代重新生成。
-    
     Args:
         task: 当前世代的任务描述（建议使用 Markdown 格式）
         
@@ -435,7 +434,6 @@ def update_generation_task_tool(task: str) -> str:
     try:
         current_gen = _load_memory().get("current_generation", 1)
         
-        # 读取现有内容
         if os.path.exists(_get_dynamic_prompt_path()):
             with open(_get_dynamic_prompt_path(), 'r', encoding='utf-8') as f:
                 existing_content = f.read()
@@ -445,12 +443,10 @@ def update_generation_task_tool(task: str) -> str:
         # 提取累积的洞察（保留世代积累的智慧）
         insights = ""
         if "## 积累的洞察" in existing_content:
-            import re
             match = re.search(r"(## 积累的洞察.*)", existing_content, re.DOTALL)
             if match:
                 insights = match.group(1).strip()
         
-        # 构建新内容
         new_content = f"""# 动态提示词区域
 
 *此区域由模型在每个世代开始时动态生成，会自动加载到系统提示词中。*
@@ -462,11 +458,9 @@ def update_generation_task_tool(task: str) -> str:
 {task}
 """
         
-        # 如果有累积洞察，添加回去
         if insights:
             new_content += f"\n---\n\n{insights}\n"
         
-        # 写入文件
         with open(_get_dynamic_prompt_path(), 'w', encoding='utf-8') as f:
             f.write(new_content)
         
@@ -488,8 +482,6 @@ def add_insight_to_dynamic_tool(insight: str) -> str:
     """
     将洞察追加到动态提示词的积累区域。
     
-    模型可以在进化过程中随时追加洞察，这些洞察会跨世代保留。
-    
     Args:
         insight: 要追加的洞察内容
         
@@ -499,31 +491,31 @@ def add_insight_to_dynamic_tool(insight: str) -> str:
     try:
         current_gen = _load_memory().get("current_generation", 1)
         
-        # 读取现有内容
         if os.path.exists(_get_dynamic_prompt_path()):
             with open(_get_dynamic_prompt_path(), 'r', encoding='utf-8') as f:
                 existing_content = f.read()
         else:
             existing_content = ""
         
-        # 检查是否有积累洞察区域
         if "## 积累的洞察" in existing_content:
-            # 追加到现有洞察
-            import re
-            # 在洞察区域追加新内容
             pattern = r"(## 积累的洞察\n\n)"
             replacement = rf"\1**G{current_gen}**: {insight}\n\n"
             updated_content = re.sub(pattern, replacement, existing_content)
         else:
-            # 创建新的洞察区域
             if existing_content.strip():
                 updated_content = existing_content.rstrip() + f"\n\n---\n\n## 积累的洞察\n\n**G{current_gen}**: {insight}\n"
             else:
                 updated_content = f"""# 动态提示词区域
 
-*此区域由模型在每个世代开始时动态生成*\n\n---\n\n## 积累的洞察\n\n**G{current_gen}**: {insight}\n"""
+*此区域由模型在每个世代开始时动态生成*
+
+---
+
+## 积累的洞察
+
+**G{current_gen}**: {insight}
+"""
         
-        # 写入文件
         with open(_get_dynamic_prompt_path(), 'w', encoding='utf-8') as f:
             f.write(updated_content)
         
@@ -544,8 +536,6 @@ def clear_generation_task() -> str:
     """
     清除世代任务区域，为下一世代做准备。
     
-    在重启时调用，保留积累的洞察，但清除任务区域。
-    
     Returns:
         操作结果
     """
@@ -556,29 +546,40 @@ def clear_generation_task() -> str:
         with open(_get_dynamic_prompt_path(), 'r', encoding='utf-8') as f:
             existing_content = f.read()
         
-        # 提取累积的洞察（保留）
         insights = ""
         if "## 积累的洞察" in existing_content:
-            import re
             match = re.search(r"(## 积累的洞察.*)", existing_content, re.DOTALL)
             if match:
                 insights = match.group(1).strip()
         
         next_gen = _load_memory().get("current_generation", 1) + 1
         
-        # 构建新内容（只保留洞察，清除任务）
         if insights:
             new_content = f"""# 动态提示词区域
 
-*此区域由模型在每个世代开始时动态生成*\n\n---\n\n## G{next_gen} 世代任务
+*此区域由模型在每个世代开始时动态生成*
 
-<!-- 模型将在此区域生成当前世代的任务 -->\n\n---\n\n{insights}\n"""
+---
+
+## G{next_gen} 世代任务
+
+<!-- 模型将在此区域生成当前世代的任务 -->
+
+---
+
+{insights}
+"""
         else:
             new_content = f"""# 动态提示词区域
 
-*此区域由模型在每个世代开始时动态生成*\n\n---\n\n## G{next_gen} 世代任务
+*此区域由模型在每个世代开始时动态生成*
 
-<!-- 模型将在此区域生成当前世代的任务 -->\n"""
+---
+
+## G{next_gen} 世代任务
+
+<!-- 模型将在此区域生成当前世代的任务 -->
+"""
         
         with open(_get_dynamic_prompt_path(), 'w', encoding='utf-8') as f:
             f.write(new_content)
@@ -593,14 +594,13 @@ def clear_generation_task() -> str:
 update_dynamic_prompt = update_generation_task_tool
 
 
-# ==================== 代码库认知地图工具 ====================
+# ============================================================================
+# 代码库认知地图工具
+# ============================================================================
 
 def record_codebase_insight_tool(module_path: str, insight: str) -> str:
     """
     刻印代码库认知到数据库
-
-    当 Agent 分析完某个代码模块后，调用此工具将结论刻入数据库，
-    供下一代 Agent 继承。
 
     Args:
         module_path: 模块路径，如 'tools/ast_tools.py' 或 '整体架构'
@@ -610,8 +610,6 @@ def record_codebase_insight_tool(module_path: str, insight: str) -> str:
         操作结果
     """
     try:
-        from core.workspace_manager import get_workspace
-
         ws = get_workspace()
         current_gen = get_generation_tool()
 
@@ -630,17 +628,201 @@ def get_global_codebase_map_tool() -> str:
     """
     获取全局代码库认知地图
 
-    查询数据库中所有模块的认知摘要，拼接成一段 Markdown 文本，
-    供 Agent 在制定计划前阅读。
-
     Returns:
         Markdown 格式的认知地图
     """
     try:
-        from core.workspace_manager import get_workspace
-
         ws = get_workspace()
         return ws.generate_codebase_map()
 
     except Exception as e:
         return f"[警告] 获取认知地图失败: {str(e)}"
+
+
+# ============================================================================
+# 任务管理工具
+# ============================================================================
+
+def set_plan_tool(goal: str, tasks: List[str]) -> str:
+    """
+    【计划制定工具】设置本轮任务清单
+
+    Args:
+        goal: 本轮的总目标描述（如 "重构错误重试逻辑"）
+        tasks: 子任务列表（3-5个），每个任务描述要具体可执行
+
+    Returns:
+        格式化的任务列表
+    """
+    result = get_task_manager().set_plan(goal, tasks)
+    
+    lines = [
+        f"[✅ 任务清单已设置]",
+        f"",
+        f"🎯 目标: {result['goal']}",
+        f"",
+        f"📋 子任务 ({result['pending_count']} 项):",
+    ]
+    
+    for task in result.get("tasks", []):
+        lines.append(f"  ⏳ [ ] {task['id']}. {task['description']}")
+    
+    lines.append("")
+    lines.append("请开始执行，完成后用 tick_subtask 逐个打勾！")
+    
+    return "\n".join(lines)
+
+
+def tick_subtask_tool(task_id: int, summary: str) -> str:
+    """
+    【任务打勾工具】标记任务完成并记录结论
+
+    Args:
+        task_id: 任务编号
+        summary: 该任务完成后的核心结论/成果
+
+    Returns:
+        完成进度信息
+    """
+    result = get_task_manager().tick_subtask(task_id, summary)
+    
+    if result["status"] != "success":
+        return f"[❌ 错误] {result.get('message', '未知错误')}"
+    
+    completed = result["completed_count"]
+    total = result["total"]
+    remaining = result["remaining"]
+    all_done = result.get("all_done", False)
+    
+    lines = [
+        f"[✅ 任务 #{task_id} 已完成]",
+        f"",
+        f"📝 结论: {summary}",
+        f"",
+        f"📊 进度: {completed}/{total}",
+    ]
+    
+    if all_done:
+        lines.extend([
+            "",
+            "🎉 【全部任务完成！】",
+            "你现在可以调用 trigger_self_restart 结束本轮了！",
+        ])
+    else:
+        lines.extend([
+            "",
+            f"⏳ 还剩 {remaining} 个任务，继续加油！",
+        ])
+    
+    return "\n".join(lines)
+
+
+def modify_task_tool(task_id: int, new_description: str) -> str:
+    """
+    【任务修改工具】修改任务描述
+
+    Args:
+        task_id: 任务编号
+        new_description: 新的任务描述
+
+    Returns:
+        修改结果
+    """
+    result = get_task_manager().modify_task(task_id, new_description)
+    
+    if result["status"] == "success":
+        return f"[✅ 任务 #{task_id} 已修改]: {new_description}"
+    return f"[❌ 错误] {result.get('message', '未知错误')}"
+
+
+def add_task_tool(description: str) -> str:
+    """
+    【任务追加工具】添加新的子任务
+
+    Args:
+        description: 新任务描述
+
+    Returns:
+        添加结果
+    """
+    result = get_task_manager().add_task(description)
+    
+    if result["status"] == "success":
+        return f"[✅ 新任务已添加] #{result['task_id']}: {description}"
+    return f"[❌ 错误] {result.get('message', '未知错误')}"
+
+
+def remove_task_tool(task_id: int) -> str:
+    """
+    【任务删除工具】删除不需要的任务
+
+    Args:
+        task_id: 要删除的任务编号
+
+    Returns:
+        删除结果
+    """
+    result = get_task_manager().remove_task(task_id)
+    
+    if result["status"] == "success":
+        return f"[✅ 任务 #{task_id} 已删除]，剩余 {result['remaining']} 个任务"
+    return f"[❌ 错误] {result.get('message', '未知错误')}"
+
+
+def check_restart_block_tool() -> tuple[bool, str]:
+    """
+    【系统内部】检查是否允许重启
+
+    Returns:
+        (is_blocked: bool, message: str)
+    """
+    tm = get_task_manager()
+    
+    if not tm.subtasks:
+        return False, ""
+    
+    if not tm.is_all_completed:
+        pending_tasks = [t for t in tm.subtasks if not t["is_completed"]]
+        pending_list = "\n".join([
+            f"  ⏳ [ ] {t['id']}. {t['description']}"
+            for t in pending_tasks
+        ])
+        
+        message = (
+            f"\n"
+            f"[系统拦截] 你的任务清单中还有未完成的项目，禁止重启！\n"
+            f"\n"
+            f"📋 未完成任务 ({len(pending_tasks)} 项):\n"
+            f"{pending_list}\n"
+            f"\n"
+            f"请继续执行剩余任务，或使用 modify_task / remove_task 调整计划。\n"
+            f"禁止调用 trigger_self_restart 直到所有任务都打勾！\n"
+        )
+        return True, message
+    
+    return False, ""
+
+
+def get_task_status_tool() -> str:
+    """
+    【状态查询工具】查看当前任务状态
+
+    Returns:
+        当前任务清单的状态摘要
+    """
+    tm = get_task_manager()
+    
+    lines = [
+        "[任务状态]",
+        "",
+        f"🎯 目标: {tm.generation_goal or '(未设置)'}",
+        f"📊 进度: {tm.completion_rate:.0%}",
+    ]
+    
+    if tm.subtasks:
+        completed = sum(1 for t in tm.subtasks if t["is_completed"])
+        lines.append(f"📋 任务: {completed}/{len(tm.subtasks)} 完成")
+    else:
+        lines.append("📋 任务: (空)")
+    
+    return "\n".join(lines)

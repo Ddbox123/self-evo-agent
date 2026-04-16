@@ -14,7 +14,7 @@ model_name = "qwen-32b-awq"
 # api_key = "sk-50d93a5673154076b3f1a19bd58e7e4f"
 api_key ="EMPTY"
 # API 端点
-api_base = "http://localhost:8000/v1"
+api_base = "http://[::1]:8000/v1"
 # 温度参数 (0.0-2.0)
 temperature = 0.2
 # 最大输出 tokens

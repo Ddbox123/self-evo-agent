@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 90 python -u agent.py --auto)"
+    ]
+  }
+}

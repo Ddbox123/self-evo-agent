@@ -499,18 +499,53 @@ def _find_match_position(content: str, search_block: str, allow_fuzzy: bool = Fa
 def _parse_diff_blocks(diff_text: str) -> List[Tuple[str, str]]:
     """解析 diff_text 中的所有 SEARCH/REPLACE 块"""
     blocks = []
-    pattern = r'<<<<<<<\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>>\s*REPLACE'
-    matches = list(re.finditer(pattern, diff_text, re.DOTALL))
-
-    if not matches:
-        simple_pattern = r'<<<<<<<\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>>'
-        matches = list(re.finditer(simple_pattern, diff_text, re.DOTALL))
-
-    for match in matches:
-        search_block = match.group(1).strip()
-        replace_block = match.group(2).strip()
-        blocks.append((search_block, replace_block))
-
+    
+    # 格式1: <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
+    pattern1 = r'<<<<<<<\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>>\s*REPLACE'
+    matches = list(re.finditer(pattern1, diff_text, re.DOTALL))
+    
+    if matches:
+        for match in matches:
+            search_block = match.group(1).strip()
+            replace_block = match.group(2).strip()
+            blocks.append((search_block, replace_block))
+        return blocks
+    
+    # 格式2: <<<<<<< ... ======= ... >>>>>>>（无 SEARCH 标记）
+    pattern2 = r'<<<<<<<\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>>'
+    matches = list(re.finditer(pattern2, diff_text, re.DOTALL))
+    
+    if matches:
+        for match in matches:
+            search_block = match.group(1).strip()
+            replace_block = match.group(2).strip()
+            blocks.append((search_block, replace_block))
+        return blocks
+    
+    # 格式3: *** Begin Patch / *** Update File: ... / @@ ... / *** End Patch
+    # 这种格式是旧系统用的，为向后兼容也支持
+    # 结构：*** Begin Patch\n*** Update File: filename\n@@\n- old line\n+ new line\n*** End Patch
+    # 提取所有 @@ 块中的 - 和 + 行
+    # 找到每个 *** Update File 块
+    update_blocks = re.findall(
+        r'\*\*\*\s*Update File:.+?\n@@\s*\n(.*?)\n(?=\*\*\*|$)',
+        diff_text, re.DOTALL
+    )
+    
+    for block in update_blocks:
+        lines = block.split('\n')
+        old_lines = []
+        new_lines = []
+        for line in lines:
+            if line.startswith('- '):
+                old_lines.append(line[2:].strip())
+            elif line.startswith('+ '):
+                new_lines.append(line[2:].strip())
+        
+        if old_lines and new_lines:
+            # 取第一个配对
+            blocks.append(('\n'.join(old_lines), '\n'.join(new_lines)))
+    
     return blocks
 
 

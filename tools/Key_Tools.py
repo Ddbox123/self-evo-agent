@@ -37,7 +37,7 @@ def create_key_tools() -> List[BaseTool]:
         Returns:
             更新结果
         """
-        return update_generation_task(task)
+        return update_generation_task_tool(task)
     @tool
     def trigger_self_restart_tool(reason: str = "") -> str:
         """
@@ -207,7 +207,7 @@ def create_key_tools() -> List[BaseTool]:
         Returns:
             合并后的命令输出（stdout + stderr）
         """
-        return execute_cli_command(command, timeout=timeout)
+        return execute_shell_command(command, timeout=timeout)
 
     @tool
     def get_project_structure_tool(target_dir: str = ".", max_depth: int = 3) -> str:
@@ -217,16 +217,14 @@ def create_key_tools() -> List[BaseTool]:
         【极其重要】：当你刚接手一个新任务，不知道代码在哪，或者需要在多个文件夹中寻找文件时，
         必须首先调用此工具获取上帝视角！
 
-        你可以通过增大 max_depth 参数来查看更深层级，但建议默认保持为 3。
-
         Args:
             target_dir: 要映射的目标目录，默认为当前目录 "."
-            max_depth: 最大递归深度，默认为 3 层。增加此值可查看更深的结构，但会消耗更多 Token。
+            max_depth: 最大递归深度，默认为 3 层。
 
         Returns:
             格式化的项目结构树字符串
         """
-        return get_project_structure(target_dir=target_dir, max_depth=max_depth)
+        return list_directory(path=target_dir, recursive=max_depth > 0)
 
     # 任务清单工具 (task_tools.py)
     @tool
