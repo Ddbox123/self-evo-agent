@@ -38,6 +38,18 @@ from .models import (
     CompressionLevelsConfig,
     CompressionSummaryCharsConfig,
     CompressionPreservationConfig,
+    # 宠物系统配置
+    PetConfig,
+    GeneConfig,
+    HeartConfig,
+    DreamConfig,
+    PersonalityConfig,
+    HungerConfig,
+    DiaryConfig,
+    SocialConfig,
+    HealthConfig,
+    SkinConfig,
+    SoundConfig,
 )
 from .providers import (
     MODEL_PRESETS,
@@ -849,6 +861,61 @@ def get_ui_config() -> UIConfig:
 def get_debug_config() -> DebugConfig:
     """获取调试配置"""
     return get_config().debug
+
+
+def get_pet_config() -> PetConfig:
+    """获取宠物系统主配置"""
+    return get_config().pet
+
+
+def get_pet_gene_config() -> GeneConfig:
+    """获取宠物基因系统配置"""
+    return get_config().pet_gene
+
+
+def get_pet_heart_config() -> HeartConfig:
+    """获取宠物心跳系统配置"""
+    return get_config().pet_heart
+
+
+def get_pet_dream_config() -> DreamConfig:
+    """获取宠物梦境系统配置"""
+    return get_config().pet_dream
+
+
+def get_pet_personality_config() -> PersonalityConfig:
+    """获取宠物性格系统配置"""
+    return get_config().pet_personality
+
+
+def get_pet_hunger_config() -> HungerConfig:
+    """获取宠物饥饿系统配置"""
+    return get_config().pet_hunger
+
+
+def get_pet_diary_config() -> DiaryConfig:
+    """获取宠物日记系统配置"""
+    return get_config().pet_diary
+
+
+def get_pet_social_config() -> SocialConfig:
+    """获取宠物社交系统配置"""
+    return get_config().pet_social
+
+
+def get_pet_health_config() -> HealthConfig:
+    """获取宠物健康系统配置"""
+    return get_config().pet_health
+
+
+def get_pet_skin_config() -> SkinConfig:
+    """获取宠物装扮系统配置"""
+    return get_config().pet_skin
+
+
+def get_pet_sound_config() -> SoundConfig:
+    """获取宠物声音系统配置"""
+    return get_config().pet_sound
 
 
 # ============================================================================

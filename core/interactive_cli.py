@@ -31,7 +31,7 @@ from config import Config, get_config
 from core.cli_ui import get_ui as get_cli_ui
 from core.ascii_art import AvatarManager, get_avatar_manager
 from core.theme import LobsterTheme
-from core.pet_system import get_pet
+from core.pet_system import get_pet_system as get_pet
 from tools.memory_tools import get_generation_tool, get_current_goal_tool
 
 
@@ -86,14 +86,14 @@ class XuebaInteractiveCLI:
         """打印头部 - 龙虾宝宝主题版"""
         pet = get_pet()
         pet_data = {
-            'level': pet.stats.level,
-            'mood': pet.stats.mood,
-            'hunger': pet.stats.hunger,
-            'energy': pet.stats.energy,
-            'health': pet.stats.health,
-            'love': pet.stats.love,
-            'exp': pet.stats.exp,
-            'exp_to_next': pet.stats.exp_to_next,
+            'level': pet.data.attributes.level,
+            'mood': pet.data.attributes.mood,
+            'hunger': pet.data.attributes.hunger,
+            'energy': pet.data.attributes.energy,
+            'health': pet.data.attributes.health,
+            'love': pet.data.attributes.love,
+            'exp': pet.data.attributes.exp,
+            'exp_to_next': pet.data.attributes.exp_to_next,
         }
 
         # 获取 ASCII Art
@@ -142,7 +142,7 @@ class XuebaInteractiveCLI:
             content,
             title="[bold bright_red]🦞 Baby Claw[/bold bright_red]",
             border_style="bright_cyan",
-            box=ROUNDED,
+            box=ASCII2,
             width=80,
         )
         self.console.print(panel)
@@ -160,7 +160,7 @@ class XuebaInteractiveCLI:
         pet_lines = pet_status.split('\n')
 
         # 获取年龄
-        age = pet.stats.level - 1
+        age = pet.data.attributes.level - 1
 
         welcome = Panel(
             f"""{art}
@@ -170,7 +170,7 @@ class XuebaInteractiveCLI:
 [green]我是你的小虾宝，已经准备好为你服务啦~[/green]
 
 [cyan]📊 当前状态:[/cyan]
-  • 年龄: {age}岁 (Lv.{pet.stats.level})
+  • 年龄: {age}岁 (Lv.{pet.data.attributes.level})
   • 目标: {self.xueba_status['current_goal'][:38] if self.xueba_status['current_goal'] else '等待任务...'}
   • 状态: {self._get_status_emoji()} {self.xueba_status['state']}
 
@@ -189,7 +189,7 @@ class XuebaInteractiveCLI:
 """,
             title="[bold bright_red]🦞 Baby Claw[/bold bright_red]",
             border_style="bright_cyan",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print(welcome)
 
@@ -227,7 +227,7 @@ class XuebaInteractiveCLI:
 
         # 获取宠物年龄
         pet = get_pet()
-        pet_level = pet.stats.level
+        pet_level = pet.data.attributes.level
         pet_age = pet_level - 1
 
         # 创建状态面板
@@ -242,7 +242,7 @@ class XuebaInteractiveCLI:
             """,
             title=f"[bold bright_red]🦞 {status_emoji} Baby Claw[/bold bright_red]",
             border_style="cyan",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print()
         self.console.print(status_panel)
@@ -257,7 +257,7 @@ class XuebaInteractiveCLI:
             f"{art}\n\n{status_text}",
             title="[bold magenta]🦞 龙虾宝宝状态[/bold magenta]",
             border_style="bright_magenta",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print()
         self.console.print(panel)
@@ -292,7 +292,7 @@ class XuebaInteractiveCLI:
 """,
                 title="[bold bright_green]🦞 切换形象[/bold bright_green]",
                 border_style="bright_green",
-                box=ROUNDED,
+                box=ASCII2,
             ))
 
             # 显示所有可选形象
@@ -329,7 +329,7 @@ class XuebaInteractiveCLI:
             """,
                 title=f"[bold bright_green]🦞 {info['icon']} {info['name']}[/bold bright_green]",
                 border_style="bright_green",
-                box=ROUNDED,
+                box=ASCII2,
             ))
 
     def print_help(self):
@@ -340,7 +340,7 @@ class XuebaInteractiveCLI:
         help_table = Table(
             title="[bold bright_red]🦞 可用命令列表[/bold bright_red]",
             border_style="bright_cyan",
-            box=ROUNDED,
+            box=ASCII2,
         )
 
         help_table.add_column("命令", style="bright_cyan", width=15)
@@ -382,7 +382,7 @@ class XuebaInteractiveCLI:
             """,
             title="[bold bright_red]💕 爱的鼓励[/bold bright_red]",
             border_style="bright_red",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print()
         self.console.print(love_panel)
@@ -431,7 +431,7 @@ class XuebaInteractiveCLI:
             """,
                 title=f"[bold bright_green]🦞 {status_emoji} 模式切换[/bold bright_green]",
                 border_style="bright_green",
-                box=ROUNDED,
+                box=ASCII2,
             )
         else:
             status_emoji = "⏳"
@@ -447,7 +447,7 @@ class XuebaInteractiveCLI:
             """,
                 title=f"[bold dim]🦞 {status_emoji} 模式切换[/bold dim]",
                 border_style="dim",
-                box=ROUNDED,
+                box=ASCII2,
             )
 
         self.console.print()
@@ -514,7 +514,7 @@ class XuebaInteractiveCLI:
             """,
             title="[bold bright_green]📨 任务提交成功[/bold bright_green]",
             border_style="bright_green",
-            box=ROUNDED,
+            box=ASCII2,
         ))
 
     def run_interactive_loop(self):
@@ -609,7 +609,7 @@ class XuebaInteractiveCLI:
                 """,
                 title="[bold]👋 再见啦[/bold]",
                 border_style="bright_cyan",
-                box=ROUNDED,
+                box=ASCII2,
             ))
 
         except Exception as e:

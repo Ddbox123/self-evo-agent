@@ -991,6 +991,117 @@ class DebugConfig(BaseModel):
 
 
 # ============================================================================
+# 宠物系统配置
+# ============================================================================
+
+class PetConfig(BaseModel):
+    """宠物系统主配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="是否启用宠物系统")
+    name: str = Field(default="虾宝", description="宠物名称")
+    auto_save: bool = Field(default=True, description="自动保存")
+    save_interval: int = Field(default=60, description="自动保存间隔(秒)")
+
+
+class GeneConfig(BaseModel):
+    """基因系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    inherit_from_model: bool = Field(default=True, description="从模型继承基因特征")
+    context_window_factor: float = Field(default=0.001, description="上下文窗口→寿命因子")
+
+
+class HeartConfig(BaseModel):
+    """心跳系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用心跳可视化")
+    active_rate: float = Field(default=2.0, description="活跃时心跳频率(Hz)")
+    idle_rate: float = Field(default=0.5, description="空闲时心跳频率(Hz)")
+    cooldown_time: int = Field(default=5, description="心跳冷却时间(秒)")
+
+
+class DreamConfig(BaseModel):
+    """梦境系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用梦境系统")
+    compression_triggers_dream: bool = Field(default=True, description="压缩时触发梦境")
+    dream_duration: int = Field(default=3, description="梦境持续时间(秒)")
+    keep_key_memory_ratio: float = Field(default=0.7, description="梦境中保留关键记忆比例")
+
+
+class PersonalityConfig(BaseModel):
+    """性格系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用性格养成")
+    learning_window: int = Field(default=100, description="学习窗口(操作次数)")
+    trait_change_rate: float = Field(default=0.05, description="性格变化率")
+
+
+class HungerConfig(BaseModel):
+    """饥饿系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用饥饿系统")
+    food_per_meal: float = Field(default=0.1, description="每次饭量占上下文比例")
+    hunger_decay_rate: float = Field(default=1.0, description="饱食度衰减率")
+    mood_decay_rate: float = Field(default=0.5, description="心情衰减率")
+    auto_feed_threshold: int = Field(default=1000, description="自动投喂阈值(tokens)")
+
+
+class DiaryConfig(BaseModel):
+    """日记系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用成长日记")
+    max_entries: int = Field(default=365, description="最大日记条目数")
+    auto_summarize: bool = Field(default=True, description="自动生成摘要")
+    sentiment_analysis: bool = Field(default=True, description="情感分析")
+
+
+class SocialConfig(BaseModel):
+    """社交系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用同伴社交")
+    track_other_models: bool = Field(default=True, description="跟踪其他模型")
+    friendship_gain_rate: float = Field(default=1.0, description="友谊增长速度")
+    max_friends: int = Field(default=10, description="最大好友数")
+
+
+class HealthConfig(BaseModel):
+    """健康系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用健康体检")
+    check_interval: int = Field(default=30, description="健康检查间隔(秒)")
+    response_time_weight: float = Field(default=0.3, description="响应时间权重")
+    error_rate_weight: float = Field(default=0.4, description="错误率权重")
+    efficiency_weight: float = Field(default=0.3, description="效率权重")
+
+
+class SkinConfig(BaseModel):
+    """装扮系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用装扮系统")
+    unlock_by_achievement: bool = Field(default=True, description="通过成就解锁皮肤")
+
+
+class SoundConfig(BaseModel):
+    """声音系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="启用情绪声音")
+    volume: float = Field(default=0.5, description="音量(0-1)")
+    mood_sounds: bool = Field(default=True, description="心情声音")
+    action_sounds: bool = Field(default=True, description="动作声音")
+
+
+# ============================================================================
 # 兼容性配置
 # ============================================================================
 
@@ -1050,6 +1161,19 @@ class AppConfig(BaseModel):
     ui: UIConfig = Field(default_factory=UIConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     compat: CompatConfig = Field(default_factory=CompatConfig)
+
+    # 宠物系统配置
+    pet: PetConfig = Field(default_factory=PetConfig)
+    pet_gene: GeneConfig = Field(default_factory=GeneConfig)
+    pet_heart: HeartConfig = Field(default_factory=HeartConfig)
+    pet_dream: DreamConfig = Field(default_factory=DreamConfig)
+    pet_personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
+    pet_hunger: HungerConfig = Field(default_factory=HungerConfig)
+    pet_diary: DiaryConfig = Field(default_factory=DiaryConfig)
+    pet_social: SocialConfig = Field(default_factory=SocialConfig)
+    pet_health: HealthConfig = Field(default_factory=HealthConfig)
+    pet_skin: SkinConfig = Field(default_factory=SkinConfig)
+    pet_sound: SoundConfig = Field(default_factory=SoundConfig)
 
     @computed_field
     @property

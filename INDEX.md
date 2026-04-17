@@ -1,8 +1,8 @@
 # 虾宝自我进化系统 - 全局索引
 
-**版本：** v4.1
+**版本：** v4.2
 **日期：** 2026-04-17
-**版本迭代：** 11次重大更新
+**版本迭代：** 12次重大更新
 **用途：** 作为所有任务的执行参照索引
 
 ---
@@ -100,7 +100,9 @@
 
 ### 报告存放位置
 
-- **路径：** `cursor_report_history/`
+- **路径：** `report_history/`
+  - `report_history/claude_report/` - Claude 代码生成的任务报告
+  - `report_history/cursor_report/` - Cursor AI 生成的任务报告
 - **命名格式：** `task_{YYYYMMDD}_{序号}_{任务摘要}.md`
 - **示例：** `task_20260417_01_Phase8自主探索模块实现.md`
 
@@ -202,7 +204,28 @@ self-evo-baby/                    # 项目根目录
 │   ├── unified_logger.py         # ✅ 完整 - 统一日志
 │   ├── transcript_logger.py       # ✅ 完整 - 转录日志
 │   ├── restarter.py              # ✅ 完整 - 重启管理
-│   ├── pet_system.py             # ⚠️ 宠物系统 (占位)
+│   │
+│   ├── ━━━ 宠物系统 (pet_system/) ━━━
+│   ├── pet_system/               # ✅ 完整 - 宠物系统模块目录
+│   │   ├── __init__.py          # 模块入口
+│   │   ├── models.py            # Pydantic 数据模型
+│   │   ├── pet_system.py        # PetSystem 核心类
+│   │   ├── subsystems/           # 子系统目录
+│   │   │   ├── base.py          # 子系统基类
+│   │   │   ├── gene_system.py   # ✅ 基因系统
+│   │   │   ├── heart_system.py  # ✅ 心跳系统
+│   │   │   ├── dream_system.py  # ✅ 梦境系统
+│   │   │   ├── personality_system.py  # ✅ 性格养成
+│   │   │   ├── hunger_system.py # ✅ 饥饿系统
+│   │   │   ├── diary_system.py  # ✅ 成长日记
+│   │   │   ├── social_system.py # ✅ 同伴社交
+│   │   │   ├── health_system.py # ✅ 健康体检
+│   │   │   ├── skin_system.py   # ✅ 装扮系统
+│   │   │   └── sound_system.py  # ✅ 声音系统
+│   │   └── utils/               # 工具目录
+│   │       ├── storage.py        # 数据存储
+│   │       └── formatters.py     # 格式化工具
+│   │
 │   ├── self_refactoror.py        # ⚠️ 自我重构器
 │   ├── theme.py                  # ⚠️ 主题系统
 │   ├── tool_ecosystem.py         # ⚠️ 工具生态系统
@@ -279,11 +302,20 @@ self-evo-baby/                    # 项目根目录
 │
 ├── workspace/                    # 工作区
 │   ├── memory/                   # 记忆存储
+│   │   ├── archives/            # 压缩快照存储
+│   │   │   ├── snapshots/       # 压缩快照 JSON
+│   │   │   ├── decisions/       # 决策记录 JSONL
+│   │   │   └── tool_stats/      # 工具统计 JSON
+│   │   ├── semantic_index.json  # 语义检索索引
+│   │   ├── forgotten/           # 遗忘回收站
+│   │   └── pet_info.json        # 宠物投喂记录
 │   ├── prompts/                  # 提示词
 │   ├── logs/                     # 日志
 │   └── analytics/                # 分析结果
 │
-├── cursor_report_history/        # 任务完成报告 (11个)
+├── report_history/               # 任务完成报告 (12个)
+│   ├── claude_report/           # Claude 任务报告
+│   └── cursor_report/            # Cursor 任务报告
 ├── backups/                      # 备份
 └── logs/                         # 日志
 ```
@@ -448,6 +480,9 @@ self-evo-baby/                    # 项目根目录
 | 反馈 | 反馈循环 | `core/feedback_loop.py` | ✅ 完整 | 多源反馈聚合 |
 | 洞察 | 洞察追踪 | `core/insight_tracker.py` | ✅ 完整 | 洞察分类管理 |
 | 洞察 | 机会发现 | `core/opportunity_finder.py` | ⚠️ 框架 | Phase 8 相关 |
+| 记忆 | 压缩持久化 | `core/compression_persister.py` | ✅ 完整 | 压缩快照持久化 |
+| 记忆 | 语义检索 | `core/semantic_retriever.py` | ✅ 完整 | 基于 embedding 搜索 |
+| 记忆 | 遗忘引擎 | `core/forgetting_engine.py` | ✅ 完整 | 选择性遗忘机制 |
 
 #### Phase 6: 自主决策
 
@@ -499,9 +534,10 @@ self-evo-baby/                    # 项目根目录
 
 | 模块 | 文件 | 状态 | 说明 |
 |------|------|------|------|
-| Agent 主类 | `agent.py` | ⚠️ 重构中 | ~1000行，需模块化拆分 |
+| Agent 主类 | `agent.py` | ⚠️ 重构中 | ~1000行，目标<500行，拆分8个模块 |
 | Agent 核心基类 | `core/agent_core.py` | ⚠️ 框架 | 抽象基类，需子类实现 |
-| 宠物系统 | `core/pet_system.py` | ⚠️ 占位 | 预留功能 |
+| Phase 8 自主探索 | `core/autonomous_*.py` | ⚠️ 框架 | 自主探索模块待完整实现 |
+| 宠物系统 | `core/pet_system/` | ✅ 完整 | 10大子系统：基因/心跳/梦境/性格/饥饿/日记/社交/健康/装扮/声音 |
 
 ---
 
@@ -522,6 +558,24 @@ self-evo-baby/                    # 项目根目录
 ### 2. 技术设计文档.md
 
 **路径：** `requirement/cursor第一次规划/技术设计文档.md`
+
+### 3. 记忆力机制优化方案.md
+
+**路径：** `requirement/claude第一次规划/记忆力机制优化方案.md`
+
+**描述：** Phase 5 记忆系统增强的 SPEC 规范，包含三层记忆架构、压缩持久化、语义检索、遗忘机制设计
+
+### 4. Phase 8 自主探索模块实现方案.md
+
+**路径：** `requirement/claude第一次规划/Phase8自主探索模块实现方案.md`
+
+**描述：** Phase 8 自主探索模块的完整实现方案，包含 AutonomousExplorer、OpportunityFinder、GoalGenerator、AgentCore 实现计划
+
+### 5. agent.py 模块化拆分方案.md
+
+**路径：** `requirement/claude第一次规划/agent.py模块化拆分方案.md`
+
+**描述：** agent.py (~1000行) 拆分为 8 个独立模块的详细方案，目标降低到 <500行
 
 **核心架构（当前状态）：**
 
@@ -672,6 +726,8 @@ SCREAMING_SNAKE_CASE (e.g., MAX_RETRY = 3)
 | 08 | [Phase 7 - 模块化Agent架构完成](cursor_report_history/task_20260416_08_Phase7模块化Agent架构完成.md) | 2026-04-16 21:00 | Phase 7 |
 | 09 | [Token 压缩机制优化](cursor_report_history/task_20260416_09_Token压缩机制优化.md) | 2026-04-16 22:00 | Token |
 | 10 | [形象选择系统实现](cursor_report_history/task_20260416_10_形象选择系统实现.md) | 2026-04-16 21:30 | UI |
+| 11 | [Phase 11 宠物系统模块化实现](cursor_report_history/task_20260417_11_Phase11宠物系统模块化实现.md) | 2026-04-17 15:58 | Phase 11 |
+| 12 | [Phase 5 记忆力机制优化实现](report_history/claude_report/task_20260417_12_Phase5记忆力机制优化实现.md) | 2026-04-17 17:30 | Phase 5 |
 
 ---
 
@@ -684,6 +740,7 @@ SCREAMING_SNAKE_CASE (e.g., MAX_RETRY = 3)
 | 2026-04-16 | v3.0 | 更新 Phase 1-6 完成状态，新增 Phase 6/7 模块索引 |
 | 2026-04-17 | v4.0 | 全面重构：SPEC设计规范、Phase 8规划、Token优化、形象系统 |
 | 2026-04-17 | v4.1 | 配置系统重构：整合config.py和config/模块，新增local provider，添加配置系统说明 |
+| 2026-04-17 | v4.2 | Phase 8 规划文档新增，新增 agent.py 拆分方案，更新目录结构说明 |
 
 ---
 

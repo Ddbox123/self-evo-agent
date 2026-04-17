@@ -573,33 +573,41 @@ class ChickASCII:
 
 # ==================== 通用 Banner 生成 ====================
 def _make_simple_banner(name: str, version: str, pet_data: dict = None) -> str:
-    """生成简洁的 Banner"""
+    """生成简洁的 Banner（跨终端兼容的 ASCII 边框）"""
     if pet_data is None:
         pet_data = {}
 
     level = pet_data.get('level', 1)
     mood = pet_data.get('mood', 100)
+    hunger = pet_data.get('hunger', 100)
     energy = pet_data.get('energy', 100)
     health = pet_data.get('health', 100)
+    love = pet_data.get('love', 100)
     exp = pet_data.get('exp', 0)
     exp_to_next = pet_data.get('exp_to_next', 100)
 
     age = level - 1
 
     mood_emoji = "😊" if mood > 70 else "😐" if mood > 40 else "😢"
+    hunger_emoji = "🍖" if hunger > 70 else "🍽️" if hunger > 40 else "😫"
     energy_emoji = "⚡" if energy > 70 else "💤" if energy > 40 else "🥱"
     health_emoji = "❤️" if health > 70 else "💔" if health > 40 else "🏥"
+    love_emoji = "💕" if love > 70 else "💗" if love > 40 else "💔"
 
     exp_percent = exp / exp_to_next if exp_to_next > 0 else 0
-    exp_bar = "█" * int(exp_percent * 6) + "░" * (6 - int(exp_percent * 6))
+    exp_bar = "#" * int(exp_percent * 6) + "-" * (6 - int(exp_percent * 6))
 
+    # 使用 ASCII 边框字符，兼容所有终端
     lines = [
         "",
-        f"  ╭──────────────────────────────────────────╮",
-        f"  │  {name} {version}                       │",
-        f"  │  {mood_emoji}心情:{mood:3}/100  {health_emoji}健康:{health:3}/100  {energy_emoji}活力:{int(energy):3}/100  │",
-        f"  │  ⭐经验:[{exp_bar}] Lv.{level} (年龄:{age}岁)  │",
-        f"  ╰──────────────────────────────────────────╯",
+        "  +----------------------------------------------------+",
+        "  |  {} {}                                      |".format(name, version),
+        "  |  {}心情:{:3}/100  {}饱食:{:3}/100  {}活力:{:3}/100  |".format(
+            mood_emoji, mood, hunger_emoji, hunger, energy_emoji, int(energy)),
+        "  |  {}健康:{:3}/100  {}爱心:{:3}/100  经验:[{}]  |".format(
+            health_emoji, health, love_emoji, love, exp_bar),
+        "  |  Lv.{} (年龄:{}岁)                                |".format(level, age),
+        "  +----------------------------------------------------+",
         "",
     ]
 

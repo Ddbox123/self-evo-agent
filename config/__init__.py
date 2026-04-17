@@ -61,6 +61,18 @@ from .models import (
     DebugConfig,
     CompatConfig,
     AvatarConfig,
+    # 宠物系统配置
+    PetConfig,
+    GeneConfig,
+    HeartConfig,
+    DreamConfig,
+    PersonalityConfig,
+    HungerConfig,
+    DiaryConfig,
+    SocialConfig,
+    HealthConfig,
+    SkinConfig,
+    SoundConfig,
 )
 
 # ============================================================================
@@ -111,6 +123,17 @@ from .settings import (
     get_strategy_config,
     get_ui_config,
     get_debug_config,
+    get_pet_config,
+    get_pet_gene_config,
+    get_pet_heart_config,
+    get_pet_dream_config,
+    get_pet_personality_config,
+    get_pet_hunger_config,
+    get_pet_diary_config,
+    get_pet_social_config,
+    get_pet_health_config,
+    get_pet_skin_config,
+    get_pet_sound_config,
 )
 
 

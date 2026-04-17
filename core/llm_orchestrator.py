@@ -234,10 +234,21 @@ class LLMOrchestrator:
             duration = time.time() - start_time
             self._stats["total_duration"] += duration
 
+            input_tokens = 0
+            output_tokens = 0
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
                 usage = response.usage_metadata
-                self._stats["total_input_tokens"] += usage.get('input_tokens', 0)
-                self._stats["total_output_tokens"] += usage.get('output_tokens', 0)
+                input_tokens = usage.get('input_tokens', 0)
+                output_tokens = usage.get('output_tokens', 0)
+                self._stats["total_input_tokens"] += input_tokens
+                self._stats["total_output_tokens"] += output_tokens
+
+            # 记录到宠物系统
+            try:
+                from core.pet_system import get_pet_system
+                get_pet_system().record_tokens(input_tokens, output_tokens)
+            except Exception:
+                pass  # 宠物系统可能未初始化
 
             # 构建响应
             llm_response = LLMResponse(

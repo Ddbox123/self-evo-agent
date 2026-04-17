@@ -11,7 +11,8 @@
       "Bash(python -m pytest tests/test_code_analysis_tools.py -v -k \"diff\")",
       "Bash(python -m py_compile tools/code_analysis_tools.py)",
       "Bash(python -m py_compile agent.py)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(git status *)"
     ]
   }
 }

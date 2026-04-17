@@ -67,6 +67,9 @@ from core.cli_ui import get_ui, ui_error
 # 导入提示词构建器
 from core.prompt_builder import build_system_prompt
 
+# 导入宠物系统
+from core.pet_system import get_pet_system
+
 
 # ============================================================================
 # 导入工具执行器（从核心模块解耦）
@@ -214,6 +217,9 @@ class SelfEvolvingAgent:
                 self.config.context_compression, 'max_token_limit', 16000
             )
 
+        # 保存 effective_max_token_limit 供 _check_and_compress 使用
+        self._effective_max_token_limit = effective_max_token_limit
+
         # 创建 LLM
         llm_kwargs = {
             "model": self.config.llm.model_name,
@@ -230,6 +236,14 @@ class SelfEvolvingAgent:
 
         self.llm = ChatOpenAI(**llm_kwargs)
         self.model_name = self.config.llm.model_name
+
+        # 调试日志：确认 max_tokens
+        _debug_logger.info(
+            f"[LLM Config] max_tokens={effective_max_tokens}, "
+            f"model={self.config.llm.model_name}, "
+            f"llm.max_tokens={self.llm.max_tokens}",
+            tag="LLM"
+        )
 
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self.key_tools)
@@ -400,7 +414,7 @@ class SelfEvolvingAgent:
         max_iterations = self.config.agent.max_iterations
 
         try:
-            # Phase 6: 在开始循环前进行决策
+            # 在开始循环前进行决策
             decision_context = self._build_decision_context(user_prompt)
             decision_result = None
             if hasattr(self, 'decision_tree'):
@@ -418,7 +432,7 @@ class SelfEvolvingAgent:
                 if iteration == 1:
                     _debug_logger.session_start(self.model_name, get_generation_tool())
 
-                # Phase 6: 动态调整迭代策略
+                # 动态调整迭代策略
                 if decision_result and hasattr(self, 'strategy_selector'):
                     self._apply_strategy_adjustments(decision_result)
 
@@ -435,8 +449,19 @@ class SelfEvolvingAgent:
                 # Token 使用
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     usage = response.usage_metadata
+                    input_tokens = usage.get('input_tokens', 0)
+                    output_tokens = usage.get('output_tokens', 0)
+
+                    # 记录到宠物系统
+                    try:
+                        pet = get_pet_system()
+                        pet.record_tokens(input_tokens, output_tokens)
+                        pet.trigger_heartbeat()
+                    except Exception:
+                        pass
+
                     _debug_logger.debug(
-                        f"Token: {usage.get('input_tokens', 0)} + {usage.get('output_tokens', 0)}",
+                        f"Token: {input_tokens} + {output_tokens}",
                         tag="LLM"
                     )
 
@@ -542,7 +567,10 @@ class SelfEvolvingAgent:
     def _check_and_compress(self, messages: list, iteration: int) -> list:
         """检查 Token 预算并在必要时压缩（增强版）"""
         current_tokens = estimate_messages_tokens(messages)
-        max_budget = self.config.context_compression.max_token_limit
+        # 优先使用运行时动态发现的 max_token_limit，其次使用配置值
+        max_budget = getattr(self, '_effective_max_token_limit', None)
+        if max_budget is None:
+            max_budget = self.config.context_compression.max_token_limit
 
         # 安全阈值
         preemptive_threshold = int(max_budget * 0.6)
@@ -635,8 +663,27 @@ class SelfEvolvingAgent:
                 messages, compressed, old_tokens, new_tokens
             )
 
-            # 记录压缩统计
+# 记录压缩统计
             self.logger.info(f"[Token压缩-{level}] {old_tokens} -> {new_tokens} (节省 {quality_report.saved_tokens})")
+
+            # 持久化压缩快照（利用新的记忆组件）
+            if self.memory_manager is not None:
+                try:
+                    from core.compression_persister import get_compression_persister
+                    persister = get_compression_persister()
+                    persister.save_snapshot(
+                        generation=get_generation_tool(),
+                        messages=messages,
+                        summary=str(compressed[-1].content)[:500] if compressed else "",
+                        before_tokens=old_tokens,
+                        after_tokens=new_tokens,
+                        level=level,
+                        reason=f"compression_{level}",
+                        key_decisions=[],
+                        tool_stats={},
+                    )
+                except Exception:
+                    pass  # 持久化失败不影响主流程
             logger.log_compression(old_tokens, new_tokens, quality_report.saved_tokens)
 
             # 保存原始消息用于可能的回退
@@ -653,6 +700,25 @@ class SelfEvolvingAgent:
             new_tokens = estimate_messages_tokens(compressed)
             self.logger.info(f"[Token压缩] {old_tokens} -> {new_tokens}")
             logger.log_compression(old_tokens, new_tokens, old_tokens - new_tokens)
+
+            # 持久化压缩快照（利用新的记忆组件）
+            if self.memory_manager is not None:
+                try:
+                    from core.compression_persister import get_compression_persister
+                    persister = get_compression_persister()
+                    persister.save_snapshot(
+                        generation=get_generation_tool(),
+                        messages=messages,
+                        summary=str(compressed[-1].content)[:500] if compressed else "",
+                        before_tokens=old_tokens,
+                        after_tokens=new_tokens,
+                        level=level,
+                        reason=f"compression_{level}",
+                        key_decisions=[],
+                        tool_stats={},
+                    )
+                except Exception:
+                    pass  # 持久化失败不影响主流程
             return compressed
 
     def _execute_tool(self, tool_call: Dict, messages: list) -> tuple:
@@ -1070,11 +1136,17 @@ def main(initial_prompt: str = None):
 
     ui.console.clear()
     ui.console.print()
-    ui.console.print("[bold cyan]╔══════════════════════════════════════════════════════════╗[/bold cyan]")
-    ui.console.print("[bold cyan]║                                                          ║[/bold cyan]")
-    ui.console.print("[bold cyan]║[bold white]Self-Evolving Agent[/bold white] - Terminal Edition            ║[/bold cyan]")
-    ui.console.print("[bold cyan]║                                                          ║[/bold cyan]")
-    ui.console.print("[bold cyan]╚══════════════════════════════════════════════════════════╝[/bold cyan]")
+    ui.console.print("[bold cyan]+==============================================================+[/bold cyan]")
+    ui.console.print("[bold cyan]|                                                              |[/bold cyan]")
+    ui.console.print("[bold cyan]|[bold white] Self-Evolving Agent[/bold white] - Terminal Edition             |[/bold cyan]")
+    ui.console.print("[bold cyan]|                                                              |[/bold cyan]")
+    ui.console.print("[bold cyan]+==============================================================+[/bold cyan]")
+
+    # 打印 ASCII Art 宠物形象
+    from core.ascii_art import get_avatar_manager
+    avatar = get_avatar_manager()
+    pet_art = avatar.get_art('happy')
+    ui.console.print(f"[bright_cyan]{pet_art}[/bright_cyan]")
     ui.console.print()
 
     args = parse_args()

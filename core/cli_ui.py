@@ -27,14 +27,18 @@ from rich.markdown import Markdown
 from rich.status import Status
 from rich.syntax import Syntax
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
-from rich.box import Box, ROUNDED, DOUBLE
+from rich.box import Box, ROUNDED, DOUBLE, ASCII2
 from rich.align import Align
 from rich.text import Text
+
+
+# 预创建全局 Console 实例用于 Banner
+_banner_console = Console(force_terminal=True)
 
 # 龙虾主题
 from core.ascii_art import get_avatar_manager
 from core.theme import LobsterTheme, get_theme, get_style
-from core.pet_system import get_pet
+from core.pet_system import get_pet_system as get_pet
 
 # 全局 Console 实例
 _console = Console(stderr=False, force_terminal=True)
@@ -105,29 +109,62 @@ class UIManager:
         # 龙虾 ASCII Art
         lobster_art = self.avatar.get_art(self._status.lower())
 
-        # 宠物年龄
-        pet_age = self.pet.stats.level - 1
-        pet_level = self.pet.stats.level
+        # 宠物属性
+        pet_attrs = self.pet.data.attributes
+        pet_age = pet_attrs.level - 1
+        pet_level = pet_attrs.level
+        pet_mood = pet_attrs.mood
+        pet_hunger = pet_attrs.hunger
+        pet_energy = int(pet_attrs.energy)
+        pet_health = pet_attrs.health
+        pet_love = pet_attrs.love
+        pet_exp = pet_attrs.exp
+        pet_exp_to_next = pet_attrs.exp_to_next
 
-        # 状态表格
-        table = Table(box=None, show_header=False, padding=(0, 2))
-        table.add_column(style="bold")
-        table.add_column()
+        # Emoji 映射
+        mood_emoji = "😊" if pet_mood > 70 else "😐" if pet_mood > 40 else "😢"
+        hunger_emoji = "🍖" if pet_hunger > 70 else "🍽️" if pet_hunger > 40 else "😫"
+        energy_emoji = "⚡" if pet_energy > 70 else "💤" if pet_energy > 40 else "🥱"
+        health_emoji = "❤️" if pet_health > 70 else "💔" if pet_health > 40 else "🏥"
+        love_emoji = "💕" if pet_love > 70 else "💗" if pet_love > 40 else "💔"
 
-        table.add_row(f"[bold {self.theme.LOBSTER_CYAN}]AGE[/bold {self.theme.LOBSTER_CYAN}]", f"[{self.theme.LOBSTER_CYAN}]{pet_age}岁(Lv.{pet_level})[/{self.theme.LOBSTER_CYAN}]")
-        table.add_row(f"[bold {self.theme.LOBSTER_ORANGE}]STATUS[/bold {self.theme.LOBSTER_ORANGE}]", f"[{status_color}]{status_icon} {self._status}[/{status_color}]")
-        table.add_row(f"[bold {self.theme.LOBSTER_PINK}]TURN[/bold {self.theme.LOBSTER_PINK}]", f"[{self.theme.LOBSTER_PINK}]#{self._iterations}[/{self.theme.LOBSTER_PINK}]")
-        table.add_row(f"[bold {self.theme.LOBSTER_GREEN}]TOOLS[/bold {self.theme.LOBSTER_GREEN}]", f"[{self.theme.LOBSTER_GREEN}]{self._tool_count}[/{self.theme.LOBSTER_GREEN}]")
+        # 经验条
+        exp_percent = pet_exp / pet_exp_to_next if pet_exp_to_next > 0 else 0
+        exp_bar = "█" * int(exp_percent * 5) + "░" * (5 - int(exp_percent * 5))
 
-        # 组合内容和龙虾 Art
-        content = f"[cyan]{lobster_art}[/cyan]\n{table}"
+        # 状态信息（文本格式，包含所有属性）
+        status_text = (
+            f"[{self.theme.LOBSTER_CYAN} bold]Lv.{pet_level}[/] ({pet_age}岁)\n"
+            f"[{status_color}]{status_icon}[/] {self._status}  "
+            f"[{self.theme.LOBSTER_ORANGE} bold]TURN[/] #{self._iterations}\n"
+            f"{mood_emoji}心情: {pet_mood}/100  "
+            f"{hunger_emoji}饱食: {pet_hunger}/100  "
+            f"{energy_emoji}活力: {pet_energy}/100\n"
+            f"{health_emoji}健康: {pet_health}/100  "
+            f"{love_emoji}爱心: {pet_love}/100  "
+            f"⭐经验 [{exp_bar}] {pet_exp}/{pet_exp_to_next}"
+        )
+
+        # Art 和状态组合（左右布局）
+        art_lines = lobster_art.strip().split('\n')
+        status_lines = status_text.split('\n')
+
+        # Art 宽度（保持对齐）
+        art_width = 12
+        combined = []
+        for i in range(max(len(art_lines), len(status_lines))):
+            left = art_lines[i] if i < len(art_lines) else " " * art_width
+            right = status_lines[i] if i < len(status_lines) else ""
+            combined.append(left + "  " + right)
+
+        content = '\n'.join(combined)
 
         return Panel(
             content,
             title=self.style.status_title,
             border_style=self.theme.LOBSTER_CYAN,
-            box=ROUNDED,
-            width=55,
+            box=ASCII2,
+            width=70,
         )
 
     def _create_task_board(self) -> Optional[Panel]:
@@ -139,7 +176,7 @@ class UIManager:
             self._task_board,
             title=f"[bold {self.theme.LOBSTER_ORANGE}]📋 任务清单[/bold {self.theme.LOBSTER_ORANGE}]",
             border_style=self.theme.LOBSTER_ORANGE,
-            box=ROUNDED,
+            box=ASCII2,
             width=60,
         )
 
@@ -150,7 +187,7 @@ class UIManager:
                 f"[dim]{self.avatar.get_art('happy')} 等待日志...[/dim]",
                 title=f"[bold {self.theme.LOBSTER_GREEN}]📝 执行日志[/bold {self.theme.LOBSTER_GREEN}]",
                 border_style=self.theme.LOBSTER_GREEN,
-                box=ROUNDED,
+                box=ASCII2,
             )
 
         # 只显示最近的日志
@@ -161,7 +198,7 @@ class UIManager:
             log_text,
             title=f"[bold {self.theme.LOBSTER_GREEN}]📝 执行日志[/bold {self.theme.LOBSTER_GREEN}] ({len(self._logs)} entries)",
             border_style=self.theme.LOBSTER_GREEN,
-            box=ROUNDED,
+            box=ASCII2,
         )
 
     def _create_full_renderable(self) -> Table:
@@ -309,12 +346,15 @@ class UIManager:
             self._generation = generation
 
         pet = get_pet()
-        pet_level = pet.stats.level
+        pet_level = pet.data.attributes.level
         pet_age = pet_level - 1
 
-        banner = self.avatar.get_banner("Baby Claw", "v1.0", pet.stats.to_dict())
+        # 获取 ASCII Art 宠物形象
+        lobster_art = self.avatar.get_art('happy')
+        banner = self.avatar.get_banner("Baby Claw", "v1.0", pet.data.attributes.model_dump())
 
         header = f"""
+{lobster_art}
 {banner}
 
 [cyan]模型:[/cyan] {model}
@@ -452,7 +492,7 @@ class UIManager:
             content,
             title=self.style.status_title,
             border_style=self.theme.LOBSTER_CYAN,
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print(panel)
 
@@ -463,7 +503,7 @@ class UIManager:
             pet_text,
             title="[bold magenta]🦞 龙虾宝宝[/bold magenta]",
             border_style="bright_magenta",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print(panel)
 
@@ -471,8 +511,8 @@ class UIManager:
         """打印欢迎面板"""
         art = self.avatar.get_art('happy')
         pet = get_pet()
-        pet_age = pet.stats.level - 1
-        pet_level = pet.stats.level
+        pet_age = pet.data.attributes.level - 1
+        pet_level = pet.data.attributes.level
 
         welcome = Panel(
             f"""{art}
@@ -495,7 +535,7 @@ class UIManager:
             """,
             title="[bold bright_red]🦞 虾宝已就绪[/bold bright_red]",
             border_style="bright_cyan",
-            box=ROUNDED,
+            box=ASCII2,
         )
         self.console.print(welcome)
 

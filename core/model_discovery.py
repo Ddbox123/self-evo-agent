@@ -108,6 +108,7 @@ class ModelDiscovery:
     # 模型 ID 中的 context_window 字段名
     CONTEXT_WINDOW_FIELDS = [
         "context_window",
+        "max_model_len",
         "max_tokens",
         "context_length",
         "max_position_embeddings",
@@ -188,7 +189,12 @@ class ModelDiscovery:
         Returns:
             ModelInfo: 模型信息
         """
-        url = f"{self.api_base}{endpoint}"
+        # 拼接 URL，避免 /v1 重复
+        # api_base 如 "http://localhost:8000/v1"，endpoint 如 "/v1/models" 或 "/models"
+        endpoint = endpoint.lstrip("/")
+        if endpoint.startswith("v1/"):
+            endpoint = endpoint[3:]  # 去掉 "v1/"
+        url = f"{self.api_base}/{endpoint}"
         logger.info(f"尝试模型发现: {url}")
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:

@@ -23,6 +23,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict
 
+# 导入新的记忆组件
+from core.semantic_retriever import SemanticRetriever, get_semantic_retriever
+from core.compression_persister import CompressionPersister, get_compression_persister
+from core.forgetting_engine import ForgettingEngine, get_forgetting_engine
+
 
 # ============================================================================
 # 记忆定义
@@ -110,6 +115,18 @@ class MemoryManager:
         self.short_term: ShortTermMemory = ShortTermMemory(session_id=self._generate_session_id())
         self.mid_term: MidTermMemory = self._load_mid_term()
         self.long_term: LongTermMemory = self._load_long_term()
+
+        # 新的记忆组件（语义检索、压缩持久化、遗忘引擎）
+        self.semantic_retriever = get_semantic_retriever(project_root)
+        self.compression_persister = get_compression_persister(project_root)
+        self.forgetting_engine = get_forgetting_engine(project_root)
+
+        # 统计
+        self._stats = {
+            "tool_calls_recorded": 0,
+            "insights_recorded": 0,
+            "memory_saves": 0,
+        }._load_long_term()
 
         # 统计
         self._stats = {
@@ -484,6 +501,226 @@ class MemoryManager:
             "short_term_tool_calls": len(self.short_term.tool_calls),
             "mid_term_insights": len(self.mid_term.insights),
             "long_term_archives": len(self.long_term.archive_index),
+        }
+
+    # =========================================================================
+    # 语义检索集成 (Phase 3)
+    # =========================================================================
+
+    def search_memories(
+        self,
+        query: str,
+        top_k: int = 5,
+        memory_type: Optional[str] = None,
+    ) -> List[tuple]:
+        """
+        语义搜索记忆
+
+        Args:
+            query: 查询文本
+            top_k: 返回数量
+            memory_type: 记忆类型过滤
+
+        Returns:
+            (记忆条目, 相似度) 列表
+        """
+        return self.semantic_retriever.search(
+            query=query,
+            top_k=top_k,
+            memory_type=memory_type,
+        )
+
+    def search_decisions(self, query: str, top_k: int = 3) -> List[tuple]:
+        """
+        搜索相关决策
+
+        Args:
+            query: 查询文本
+            top_k: 返回数量
+
+        Returns:
+            (记忆条目, 相似度) 列表
+        """
+        return self.semantic_retriever.search_decisions(query, top_k)
+
+    def search_insights(self, query: str, top_k: int = 5) -> List[tuple]:
+        """
+        搜索相关洞察
+
+        Args:
+            query: 查询文本
+            top_k: 返回数量
+
+        Returns:
+            (记忆条目, 相似度) 列表
+        """
+        return self.semantic_retriever.search_insights(query, top_k)
+
+    def index_decision(self, decision: str, context: str = "") -> Any:
+        """
+        索引关键决策
+
+        Args:
+            decision: 决策内容
+            context: 决策上下文
+
+        Returns:
+            记忆条目
+        """
+        entry = self.semantic_retriever.index_decision(
+            decision=decision,
+            context=context,
+            generation=self.long_term.current_generation,
+        )
+        # 同时保存到中期记忆的压缩持久化
+        self.compression_persister.save_decision(
+            generation=self.long_term.current_generation,
+            decision=decision,
+            context=context,
+        )
+        return entry
+
+    def index_insight(self, insight: str, category: str = "general") -> Any:
+        """
+        索引洞察
+
+        Args:
+            insight: 洞察内容
+            category: 分类
+
+        Returns:
+            记忆条目
+        """
+        return self.semantic_retriever.index_insight(
+            insight=insight,
+            category=category,
+            generation=self.long_term.current_generation,
+        )
+
+    def index_tool_usage(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        result: str,
+        success: bool,
+    ) -> Any:
+        """
+        索引工具使用
+
+        Args:
+            tool_name: 工具名称
+            args: 工具参数
+            result: 执行结果
+            success: 是否成功
+
+        Returns:
+            记忆条目
+        """
+        return self.semantic_retriever.index_tool_usage(
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            success=success,
+            generation=self.long_term.current_generation,
+        )
+
+    # =========================================================================
+    # 压缩持久化集成 (Phase 2)
+    # =========================================================================
+
+    def save_compression_snapshot(
+        self,
+        messages: List[Any],
+        summary: str,
+        before_tokens: int,
+        after_tokens: int,
+        level: str = "standard",
+        reason: str = "",
+        key_decisions: Optional[List[Dict[str, Any]]] = None,
+        tool_stats: Optional[Dict[str, int]] = None,
+    ) -> Any:
+        """
+        保存压缩快照
+
+        Args:
+            messages: 压缩后的消息列表
+            summary: 压缩摘要
+            before_tokens: 压缩前 token 数
+            after_tokens: 压缩后 token 数
+            level: 压缩级别
+            reason: 压缩原因
+            key_decisions: 关键决策
+            tool_stats: 工具统计
+
+        Returns:
+            压缩快照
+        """
+        return self.compression_persister.save_snapshot(
+            generation=self.long_term.current_generation,
+            messages=messages,
+            summary=summary,
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+            level=level,
+            reason=reason,
+            key_decisions=key_decisions,
+            tool_stats=tool_stats,
+        )
+
+    def load_latest_snapshot(self) -> Optional[Any]:
+        """
+        加载最新压缩快照
+
+        Returns:
+            最新压缩快照
+        """
+        return self.compression_persister.load_latest_snapshot(self.long_term.current_generation)
+
+    # =========================================================================
+    # 遗忘引擎集成 (Phase 4)
+    # =========================================================================
+
+    def run_forgetting(self) -> int:
+        """
+        运行遗忘引擎
+
+        Returns:
+            遗忘的记忆数量
+        """
+        all_entries = list(self.semantic_retriever.index.values())
+        forgotten_count = 0
+
+        for entry in all_entries:
+            should_forget, reason = self.forgetting_engine.should_forget(entry)
+            if should_forget:
+                self.forgetting_engine.forget(entry.id, entry, reason)
+                self.semantic_retriever.delete(entry.id)
+                forgotten_count += 1
+
+        self.forgetting_engine.cleanup_trash()
+        return forgotten_count
+
+    # =========================================================================
+    # 增强统计 (Phase 5)
+    # =========================================================================
+
+    def get_full_stats(self) -> Dict[str, Any]:
+        """
+        获取完整统计
+
+        Returns:
+            完整统计信息
+        """
+        semantic_stats = self.semantic_retriever.get_stats()
+        forgetting_stats = self.forgetting_engine.get_forgetting_stats()
+        persister_stats = self.compression_persister.get_storage_stats()
+
+        return {
+            "basic": self.get_statistics(),
+            "semantic": semantic_stats,
+            "compression": persister_stats,
+            "forgetting": forgetting_stats,
+            "generation": self.long_term.current_generation,
         }
 
 
