@@ -15,11 +15,29 @@ from typing import Optional, Dict, Any, TYPE_CHECKING
 from .models import (
     AppConfig,
     LLMConfig,
+    LLMDiscoveryConfig,
+    LocalLLMConfig,
     AgentConfig,
     ContextCompressionConfig,
     ToolConfig,
     LogConfig,
+    LogThirdPartyConfig,
     NetworkConfig,
+    EvolutionConfig,
+    MemoryConfig,
+    StrategyConfig,
+    AnalysisConfig,
+    UIConfig,
+    DebugConfig,
+    CompatConfig,
+    SecurityConfig,
+    ToolsFileConfig,
+    ToolsShellConfig,
+    ToolsSearchConfig,
+    ToolsWebConfig,
+    CompressionLevelsConfig,
+    CompressionSummaryCharsConfig,
+    CompressionPreservationConfig,
 )
 from .providers import (
     MODEL_PRESETS,
@@ -63,7 +81,7 @@ class ConfigLoader:
     配置加载器
 
     负责从 TOML 文件、环境变量加载配置到 Pydantic 模型。
-    配置优先级：环境变量 > TOML 文件 > 默认值
+    配置优先级：命令行参数(kwargs) > TOML > 环境变量 > 默认值
     """
 
     def __init__(self, config_path: Optional[str] = None) -> None:
@@ -123,10 +141,37 @@ class ConfigLoader:
 
         try:
             with open(config_file, 'rb') as f:
-                return tomllib.load(f)
+                config = tomllib.load(f)
+            # 转换 TOML 嵌套键为 Pydantic 字段格式
+            return self._normalize_toml_keys(config)
         except Exception as e:
             print(f"警告: 读取配置文件失败: {e}")
             return {}
+
+    def _normalize_toml_keys(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将 TOML 嵌套键转换为 Pydantic 字段格式
+
+        TOML 解析结果: {'llm': {'local': {...}, 'discovery': {...}}}
+        Pydantic 期望: {'llm_local': {...}, 'llm_discovery': {...}}
+
+        Args:
+            config: TOML 解析后的配置字典
+
+        Returns:
+            转换后的配置字典
+        """
+        result = config.copy()
+        if 'llm' in result and isinstance(result['llm'], dict):
+            llm_section = result['llm']
+            # 转换 llm.local -> llm_local
+            if 'local' in llm_section:
+                result['llm_local'] = llm_section.pop('local')
+            # 转换 llm.discovery -> llm_discovery
+            if 'discovery' in llm_section:
+                result['llm_discovery'] = llm_section.pop('discovery')
+            # context_compression.levels 和 .preservation 保持嵌套
+        return result
 
     def _load_from_env(self, prefix: str = "AGENT_") -> Dict[str, Any]:
         """
@@ -137,6 +182,7 @@ class ConfigLoader:
         - AGENT_LLM_TEMPERATURE -> llm.temperature
         - AGENT_AGENT_NAME -> agent.name
         - AGENT_LOG_LEVEL -> log.level
+        - AGENT_TOOLS_SHELL_DEFAULT_TIMEOUT -> tools.shell.default_timeout
 
         Args:
             prefix: 环境变量前缀
@@ -146,9 +192,9 @@ class ConfigLoader:
         """
         config: Dict[str, Any] = {}
 
-        # 环境变量到配置项的映射
+        # 环境变量到配置项的映射（扩展版）
         env_mappings = {
-            # LLM 配置
+            # === LLM 配置 ===
             f"{prefix}LLM_PROVIDER": ("llm", "provider"),
             f"{prefix}LLM_MODEL_NAME": ("llm", "model_name"),
             f"{prefix}LLM_API_KEY": ("llm", "api_key"),
@@ -156,50 +202,231 @@ class ConfigLoader:
             f"{prefix}LLM_TEMPERATURE": ("llm", "temperature"),
             f"{prefix}LLM_MAX_TOKENS": ("llm", "max_tokens"),
             f"{prefix}LLM_API_TIMEOUT": ("llm", "api_timeout"),
+            f"{prefix}LLM_CONNECT_TIMEOUT": ("llm", "connect_timeout"),
 
-            # Agent 配置
+            # === LLM Discovery 配置 ===
+            f"{prefix}LLM_DISCOVERY_ENABLED": ("llm_discovery", "enabled"),
+            f"{prefix}LLM_DISCOVERY_TIMEOUT": ("llm_discovery", "timeout"),
+            f"{prefix}LLM_DISCOVERY_FALLBACK_MAX_TOKENS": ("llm_discovery", "fallback_max_tokens"),
+            f"{prefix}LLM_DISCOVERY_FALLBACK_MAX_TOKEN_LIMIT": ("llm_discovery", "fallback_max_token_limit"),
+            f"{prefix}LLM_DISCOVERY_AUTO_ADJUST": ("llm_discovery", "auto_adjust"),
+            f"{prefix}LLM_DISCOVERY_OUTPUT_RESERVE_RATIO": ("llm_discovery", "output_reserve_ratio"),
+
+            # === 本地 LLM 配置 ===
+            f"{prefix}LLM_LOCAL_URL": ("llm_local", "url"),
+            f"{prefix}LLM_LOCAL_MODEL": ("llm_local", "model"),
+            f"{prefix}LLM_LOCAL_REQUIRE_API_KEY": ("llm_local", "require_api_key"),
+            f"{prefix}LLM_LOCAL_API_KEY": ("llm_local", "api_key"),
+            f"{prefix}LLM_LOCAL_STREAMING": ("llm_local", "streaming"),
+            f"{prefix}LLM_LOCAL_CONTEXT_WINDOW": ("llm_local", "context_window"),
+            f"{prefix}LLM_LOCAL_AUTO_DETECT_MODEL": ("llm_local", "auto_detect_model"),
+            f"{prefix}LLM_LOCAL_MODEL_REFRESH_INTERVAL": ("llm_local", "model_refresh_interval"),
+            f"{prefix}LLM_LOCAL_MAX_RETRIES": ("llm_local", "max_retries"),
+            f"{prefix}LLM_LOCAL_RETRY_DELAY": ("llm_local", "retry_delay"),
+
+            # === Agent 配置 ===
             f"{prefix}AGENT_NAME": ("agent", "name"),
             f"{prefix}AGENT_WORKSPACE": ("agent", "workspace"),
-            f"{prefix}AWARE_INTERVAL": ("agent", "awake_interval"),
+            f"{prefix}AGENT_AWAKE_INTERVAL": ("agent", "awake_interval"),
             f"{prefix}AGENT_MAX_ITERATIONS": ("agent", "max_iterations"),
             f"{prefix}AGENT_MAX_RUNTIME": ("agent", "max_runtime"),
             f"{prefix}AGENT_AUTO_BACKUP": ("agent", "auto_backup"),
             f"{prefix}AGENT_BACKUP_INTERVAL": ("agent", "backup_interval"),
             f"{prefix}AGENT_AUTO_RESTART_THRESHOLD": ("agent", "auto_restart_threshold"),
+            f"{prefix}AGENT_EXPLORATION_MODE": ("agent", "exploration_mode"),
 
-            # 压缩配置
+            # === 上下文压缩配置 ===
             f"{prefix}COMPRESSION_ENABLED": ("context_compression", "enabled"),
             f"{prefix}COMPRESSION_MAX_TOKEN_LIMIT": ("context_compression", "max_token_limit"),
             f"{prefix}COMPRESSION_KEEP_RECENT_STEPS": ("context_compression", "keep_recent_steps"),
             f"{prefix}COMPRESSION_SUMMARY_MAX_CHARS": ("context_compression", "summary_max_chars"),
             f"{prefix}COMPRESSION_MODEL": ("context_compression", "compression_model"),
+            f"{prefix}COMPRESSION_TEMPERATURE": ("context_compression", "compression_temperature"),
+            f"{prefix}COMPRESSION_MAX_COMPRESSIONS": ("context_compression", "max_compressions_per_session"),
+            f"{prefix}COMPRESSION_EFFECTIVENESS_THRESHOLD": ("context_compression", "effectiveness_threshold"),
 
-            # 日志配置
+            # === 压缩级别阈值 ===
+            f"{prefix}COMPRESSION_LEVEL_LIGHT": ("context_compression", "levels.light"),
+            f"{prefix}COMPRESSION_LEVEL_STANDARD": ("context_compression", "levels.standard"),
+            f"{prefix}COMPRESSION_LEVEL_DEEP": ("context_compression", "levels.deep"),
+            f"{prefix}COMPRESSION_LEVEL_EMERGENCY": ("context_compression", "levels.emergency"),
+
+            # === 压缩摘要字数 ===
+            f"{prefix}COMPRESSION_SUMMARY_LIGHT": ("context_compression", "summary_chars.light"),
+            f"{prefix}COMPRESSION_SUMMARY_STANDARD": ("context_compression", "summary_chars.standard"),
+            f"{prefix}COMPRESSION_SUMMARY_DEEP": ("context_compression", "summary_chars.deep"),
+            f"{prefix}COMPRESSION_SUMMARY_EMERGENCY": ("context_compression", "summary_chars.emergency"),
+
+            # === 压缩保留策略 ===
+            f"{prefix}COMPRESSION_KEEP_AI_MESSAGES": ("context_compression", "preservation.keep_ai_messages"),
+            f"{prefix}COMPRESSION_KEEP_TOOL_RESULTS": ("context_compression", "preservation.keep_tool_results"),
+            f"{prefix}COMPRESSION_PRESERVE_ERRORS": ("context_compression", "preservation.preserve_errors"),
+            f"{prefix}COMPRESSION_EXTRACT_KEY_DECISIONS": ("context_compression", "preservation.extract_key_decisions"),
+
+            # === 文件工具配置 ===
+            f"{prefix}TOOLS_FILE_EDIT_ENABLED": ("tools", "file.edit_enabled"),
+            f"{prefix}TOOLS_FILE_CREATE_ENABLED": ("tools", "file.create_enabled"),
+            f"{prefix}TOOLS_FILE_SYNTAX_CHECK_ENABLED": ("tools", "file.syntax_check_enabled"),
+            f"{prefix}TOOLS_FILE_MAX_READ_LINES": ("tools", "file.max_read_lines"),
+            f"{prefix}TOOLS_FILE_MAX_READ_CHARS": ("tools", "file.max_read_chars"),
+
+            # === Shell 工具配置 ===
+            f"{prefix}TOOLS_SHELL_ENABLED": ("tools", "shell.enabled"),
+            f"{prefix}TOOLS_SHELL_DEFAULT_TIMEOUT": ("tools", "shell.default_timeout"),
+            f"{prefix}TOOLS_SHELL_MAX_OUTPUT_LENGTH": ("tools", "shell.max_output_length"),
+            f"{prefix}TOOLS_SHELL_MAX_FILE_SIZE": ("tools", "shell.max_file_size"),
+            f"{prefix}TOOLS_SHELL_SAFETY_CHECK": ("tools", "shell.safety_check"),
+            f"{prefix}TOOLS_SHELL_DANGEROUS_PATTERN_CHECK": ("tools", "shell.dangerous_pattern_check"),
+
+            # === 搜索工具配置 ===
+            f"{prefix}TOOLS_SEARCH_MAX_FILE_SIZE": ("tools", "search.max_file_size"),
+            f"{prefix}TOOLS_SEARCH_MAX_MATCHES_PER_FILE": ("tools", "search.max_matches_per_file"),
+            f"{prefix}TOOLS_SEARCH_MAX_RESULTS": ("tools", "search.max_results"),
+            f"{prefix}TOOLS_SEARCH_CONTEXT_LINES": ("tools", "search.context_lines"),
+
+            # === 网络工具配置 ===
+            f"{prefix}TOOLS_WEB_SEARCH_ENABLED": ("tools", "web.search_enabled"),
+            f"{prefix}TOOLS_WEB_MAX_SEARCH_RESULTS": ("tools", "web.max_search_results"),
+            f"{prefix}TOOLS_WEB_SEARCH_TIMEOUT": ("tools", "web.search_timeout"),
+
+            # === 安全配置 ===
+            f"{prefix}SECURITY_ENABLED": ("security", "enabled"),
+
+            # === 日志配置 ===
             f"{prefix}LOG_LEVEL": ("log", "level"),
             f"{prefix}LOG_FILE_ENABLED": ("log", "file_enabled"),
+            f"{prefix}LOG_FILE_PATH": ("log", "file_path"),
+            f"{prefix}LOG_FORMAT": ("log", "format"),
+            f"{prefix}LOG_DATE_FORMAT": ("log", "date_format"),
+            f"{prefix}LOG_MAX_FILE_SIZE": ("log", "max_file_size"),
+            f"{prefix}LOG_BACKUP_COUNT": ("log", "backup_count"),
+            f"{prefix}LOG_DETAILED_TRACEBACK": ("log", "detailed_traceback"),
 
-            # 网络配置
+            # === 网络配置 ===
             f"{prefix}NETWORK_TIMEOUT": ("network", "timeout"),
             f"{prefix}NETWORK_MAX_RETRIES": ("network", "max_retries"),
+            f"{prefix}NETWORK_RETRY_DELAY": ("network", "retry_delay"),
+            f"{prefix}NETWORK_USER_AGENT": ("network", "user_agent"),
+            f"{prefix}NETWORK_VERIFY_SSL": ("network", "verify_ssl"),
+
+            # === 进化引擎配置 ===
+            f"{prefix}EVOLUTION_ENABLED": ("evolution", "enabled"),
+            f"{prefix}EVOLUTION_CONFIG_PATH": ("evolution", "config_path"),
+            f"{prefix}EVOLUTION_ARCHIVE_DIR": ("evolution", "archive_dir"),
+            f"{prefix}EVOLUTION_BACKUP_DIR": ("evolution", "backup_dir"),
+            f"{prefix}EVOLUTION_TEST_GATE_ENABLED": ("evolution", "test_gate_enabled"),
+            f"{prefix}EVOLUTION_TEST_GATE_TIMEOUT": ("evolution", "test_gate_timeout"),
+            f"{prefix}EVOLUTION_TEST_COMMAND": ("evolution", "test_command"),
+
+            # === 记忆系统配置 ===
+            f"{prefix}MEMORY_STORAGE_DIR": ("memory", "storage_dir"),
+            f"{prefix}MEMORY_MEMORY_FILE": ("memory", "memory_file"),
+            f"{prefix}MEMORY_ARCHIVE_DIR": ("memory", "archive_dir"),
+            f"{prefix}MEMORY_MAX_ENTRIES": ("memory", "max_entries"),
+
+            # === 策略系统配置 ===
+            f"{prefix}STRATEGY_DATA_DIR": ("strategy", "data_dir"),
+            f"{prefix}STRATEGY_EXPLORATION_RATE": ("strategy", "exploration_rate"),
+            f"{prefix}STRATEGY_LEARNING_ENABLED": ("strategy", "learning_enabled"),
+            f"{prefix}STRATEGY_LEARNING_DATA_PATH": ("strategy", "learning_data_path"),
+
+            # === 代码分析配置 ===
+            f"{prefix}ANALYSIS_DATA_DIR": ("analysis", "data_dir"),
+            f"{prefix}ANALYSIS_FEEDBACK_DIR": ("analysis", "feedback_dir"),
+            f"{prefix}ANALYSIS_KNOWLEDGE_GRAPH_PATH": ("analysis", "knowledge_graph_path"),
+            f"{prefix}ANALYSIS_PATTERN_LIBRARY_PATH": ("analysis", "pattern_library_path"),
+
+            # === UI 配置 ===
+            f"{prefix}UI_THEME": ("ui", "theme"),
+            f"{prefix}UI_MAX_LOG_ENTRIES": ("ui", "max_log_entries"),
+            f"{prefix}UI_REFRESH_RATE": ("ui", "refresh_rate"),
+            f"{prefix}UI_SHOW_ASCII_ART": ("ui", "show_ascii_art"),
+            f"{prefix}UI_SHOW_WELCOME": ("ui", "show_welcome"),
+
+            # === 调试配置 ===
+            f"{prefix}DEBUG_ENABLED": ("debug", "enabled"),
+            f"{prefix}DEBUG_VERBOSE": ("debug", "verbose"),
+            f"{prefix}DEBUG_TRACE_LLM": ("debug", "trace_llm"),
+            f"{prefix}DEBUG_TRACE_TOOLS": ("debug", "trace_tools"),
+            f"{prefix}DEBUG_TRACK_TOKEN_USAGE": ("debug", "track_token_usage"),
+
+            # === 兼容性配置 ===
+            f"{prefix}COMPAT_LEGACY_API_ENABLED": ("compat", "legacy_api_enabled"),
+            f"{prefix}COMPAT_LEGACY_CONFIG_PATH": ("compat", "legacy_config_path"),
+
+            # === 向后兼容（遗留）配置 ===
+            f"{prefix}AWARE_INTERVAL": ("agent", "awake_interval"),
+        }
+
+        # 布尔类型配置项
+        bool_keys = {
+            "llm_discovery.enabled", "llm_discovery.auto_adjust",
+            "llm_local.require_api_key", "llm_local.streaming", "llm_local.auto_detect_model",
+            "agent.auto_backup", "agent.exploration_mode",
+            "context_compression.enabled", "context_compression.preservation.keep_tool_results",
+            "context_compression.preservation.preserve_errors", "context_compression.preservation.extract_key_decisions",
+            "tools.file.edit_enabled", "tools.file.create_enabled", "tools.file.syntax_check_enabled",
+            "tools.shell.enabled", "tools.shell.safety_check", "tools.shell.dangerous_pattern_check",
+            "tools.web.search_enabled",
+            "security.enabled",
+            "log.file_enabled", "log.detailed_traceback",
+            "network.verify_ssl",
+            "evolution.enabled", "evolution.test_gate_enabled",
+            "strategy.learning_enabled",
+            "ui.show_ascii_art", "ui.show_welcome",
+            "debug.enabled", "debug.verbose", "debug.trace_llm", "debug.trace_tools", "debug.track_token_usage",
+            "compat.legacy_api_enabled",
+        }
+
+        # 浮点类型配置项
+        float_keys = {
+            "llm.temperature",
+            "llm_discovery.output_reserve_ratio",
+            "context_compression.compression_temperature", "context_compression.effectiveness_threshold",
+            "context_compression.levels.light", "context_compression.levels.standard",
+            "context_compression.levels.deep", "context_compression.levels.emergency",
+            "context_compression.preservation.keep_ai_messages",
+            "network.retry_delay",
+            "strategy.exploration_rate",
         }
 
         for env_var, (section, key) in env_mappings.items():
             value = os.environ.get(env_var)
             if value is not None:
+                # 处理嵌套配置（如 context_compression.levels.light）
+                if '.' in key:
+                    parts = key.split('.')
+                    section = parts[0]
+                    key = parts[1]
+
                 if section not in config:
                     config[section] = {}
 
                 # 类型转换
-                if key == "temperature":
-                    value = float(value)
-                elif key in ("max_tokens", "api_timeout", "awake_interval",
-                            "max_iterations", "max_runtime", "backup_interval",
-                            "auto_restart_threshold", "timeout", "max_retries",
-                            "max_token_limit", "keep_recent_steps",
-                            "summary_max_chars"):
-                    value = int(value)
-                elif key in ("auto_backup", "file_enabled", "enabled"):
+                full_key = f"{section}.{key}"
+                if full_key in bool_keys:
                     value = value.lower() in ("true", "1", "yes", "on")
+                elif full_key in float_keys:
+                    try:
+                        value = float(value)
+                    except ValueError:
+                        value = value
+                elif key in ("max_tokens", "api_timeout", "connect_timeout",
+                            "awake_interval", "max_iterations", "max_runtime",
+                            "backup_interval", "auto_restart_threshold",
+                            "timeout", "max_retries", "max_token_limit",
+                            "keep_recent_steps", "summary_max_chars",
+                            "max_compressions_per_session", "max_read_lines",
+                            "max_read_chars", "default_timeout", "max_output_length",
+                            "max_file_size", "max_matches_per_file", "max_results",
+                            "context_lines", "max_search_results", "search_timeout",
+                            "max_file_size", "backup_count", "max_entries",
+                            "test_gate_timeout", "max_log_entries", "refresh_rate",
+                            "llm_discovery.timeout"):
+                    try:
+                        value = int(value)
+                    except ValueError:
+                        value = value
 
                 config[section][key] = value
 
@@ -223,11 +450,15 @@ class ConfigLoader:
 
         return config
 
-    def load(self) -> AppConfig:
+    def load(self, **kwargs) -> AppConfig:
         """
         加载完整配置
 
-        优先级：环境变量 > TOML > 默认值
+        优先级：命令行参数(kwargs) > TOML > 环境变量 > 默认值
+
+        Args:
+            **kwargs: 直接指定的配置项，如 llm.model_name="gpt-4"
+                     支持点号分隔的嵌套键，如 context_compression.max_token_limit=16000
 
         Returns:
             AppConfig 实例
@@ -235,17 +466,51 @@ class ConfigLoader:
         # 1. 创建默认配置
         config = AppConfig()
 
-        # 2. 从 TOML 加载
-        toml_config = self._load_from_toml()
-        if toml_config:
-            config = self._apply_dict(config, toml_config)
-
-        # 3. 从环境变量加载
+        # 2. 从环境变量加载（较低优先级）
         env_config = self._load_from_env()
         if env_config:
             config = self._apply_dict(config, env_config)
 
+        # 3. 从 TOML 加载（较高优先级，会覆盖环境变量）
+        toml_config = self._load_from_toml()
+        if toml_config:
+            config = self._apply_dict(config, toml_config)
+
+        # 4. 从 kwargs 加载（最高优先级，会覆盖 TOML）
+        if kwargs:
+            kwargs_config = self._flatten_kwargs(kwargs)
+            config = self._apply_dict(config, kwargs_config)
+
         return config
+
+    def _flatten_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将 kwargs 展平为嵌套字典
+
+        Args:
+            kwargs: 可能包含点号或双下划线分隔的嵌套键
+                   支持格式：'llm.model_name' 或 'llm__model_name'
+
+        Returns:
+            展平后的配置字典（Pydantic 字段格式）
+        """
+        result: Dict[str, Any] = {}
+        for key, value in kwargs.items():
+            # 将双下划线转换为点号
+            normalized_key = key.replace('__', '.')
+            if '.' in normalized_key:
+                parts = normalized_key.split('.')
+                current = result
+                for part in parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                current[parts[-1]] = value
+            else:
+                result[normalized_key] = value
+
+        # 转换嵌套格式为 Pydantic 字段格式（与 _normalize_toml_keys 一致）
+        return self._normalize_toml_keys(result)
 
     def _apply_dict(self, config: AppConfig, data: Dict[str, Any]) -> AppConfig:
         """
@@ -302,36 +567,41 @@ class Settings:
         settings.use_model("gpt-4")
     """
 
-    def __init__(self, config_path: Optional[str] = None) -> None:
+    def __init__(self, config_path: Optional[str] = None, **kwargs) -> None:
         """
         初始化配置管理器
 
         Args:
             config_path: 配置文件路径
+            **kwargs: 直接指定的配置项（最高优先级）
+                     如 llm.model_name="gpt-4", context_compression.max_token_limit=16000
         """
         self._loader = ConfigLoader(config_path)
         self._config: Optional[AppConfig] = None
+        self._kwargs = kwargs
 
     @property
     def config(self) -> AppConfig:
         """获取当前配置（延迟加载）"""
         if self._config is None:
-            self._config = self._loader.load()
+            self._config = self._loader.load(**self._kwargs)
         return self._config
 
-    def reload(self, config_path: Optional[str] = None) -> AppConfig:
+    def reload(self, config_path: Optional[str] = None, **kwargs) -> AppConfig:
         """
         重新加载配置
 
         Args:
             config_path: 新的配置文件路径
+            **kwargs: 直接指定的配置项（最高优先级）
 
         Returns:
             重新加载后的配置
         """
         if config_path:
             self._loader = ConfigLoader(config_path)
-        self._config = self._loader.load()
+        self._kwargs = kwargs
+        self._config = self._loader.load(**self._kwargs)
         return self._config
 
     def use_model(
@@ -432,32 +702,40 @@ class Settings:
 # 全局单例访问
 # ============================================================================
 
-def get_settings(config_path: Optional[str] = None) -> Settings:
+def get_settings(config_path: Optional[str] = None, **kwargs) -> Settings:
     """
     获取 Settings 单例
 
     Args:
         config_path: 配置文件路径，首次调用后忽略
+        **kwargs: 直接指定的配置项（最高优先级）
 
     Returns:
         Settings 实例
     """
     global _settings, _config_path
 
-    if _settings is None or config_path is not None:
-        _settings = Settings(config_path)
+    if _settings is None or config_path is not None or kwargs:
+        _settings = Settings(config_path, **kwargs)
         _config_path = config_path
 
     return _settings
 
 
-def get_config() -> AppConfig:
+def get_config(**kwargs) -> AppConfig:
     """
     获取当前配置（便捷函数）
+
+    Args:
+        **kwargs: 直接指定的配置项（最高优先级）
+                 如 get_config(llm.model_name="gpt-4")
 
     Returns:
         AppConfig 实例
     """
+    if kwargs:
+        # 使用 kwargs 创建新配置
+        return get_settings(**kwargs).config
     return get_settings().config
 
 
@@ -505,6 +783,75 @@ def switch_model(model_id: str, **kwargs) -> AppConfig:
 
 
 # ============================================================================
+# 便捷配置访问函数
+# ============================================================================
+
+def get_llm_config() -> LLMConfig:
+    """获取 LLM 配置"""
+    return get_config().llm
+
+
+def get_local_llm_config() -> LocalLLMConfig:
+    """获取本地 LLM 配置"""
+    return get_config().llm_local
+
+
+def get_agent_config() -> AgentConfig:
+    """获取 Agent 配置"""
+    return get_config().agent
+
+
+def get_compression_config() -> ContextCompressionConfig:
+    """获取压缩配置"""
+    return get_config().context_compression
+
+
+def get_tools_config() -> ToolConfig:
+    """获取工具配置"""
+    return get_config().tools
+
+
+def get_log_config() -> LogConfig:
+    """获取日志配置"""
+    return get_config().log
+
+
+def get_network_config() -> NetworkConfig:
+    """获取网络配置"""
+    return get_config().network
+
+
+def get_security_config() -> SecurityConfig:
+    """获取安全配置"""
+    return get_config().security
+
+
+def get_evolution_config() -> EvolutionConfig:
+    """获取进化引擎配置"""
+    return get_config().evolution
+
+
+def get_memory_config() -> MemoryConfig:
+    """获取记忆系统配置"""
+    return get_config().memory
+
+
+def get_strategy_config() -> StrategyConfig:
+    """获取策略系统配置"""
+    return get_config().strategy
+
+
+def get_ui_config() -> UIConfig:
+    """获取 UI 配置"""
+    return get_config().ui
+
+
+def get_debug_config() -> DebugConfig:
+    """获取调试配置"""
+    return get_config().debug
+
+
+# ============================================================================
 # 导出
 # ============================================================================
 
@@ -518,6 +865,20 @@ __all__ = [
     "get_config",
     "use_model",
     "switch_model",
+    # 便捷配置访问函数
+    "get_llm_config",
+    "get_local_llm_config",
+    "get_agent_config",
+    "get_compression_config",
+    "get_tools_config",
+    "get_log_config",
+    "get_network_config",
+    "get_security_config",
+    "get_evolution_config",
+    "get_memory_config",
+    "get_strategy_config",
+    "get_ui_config",
+    "get_debug_config",
     # 从 providers 导出
     "MODEL_PRESETS",
     "get_model_preset",

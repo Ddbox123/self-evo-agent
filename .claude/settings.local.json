@@ -7,7 +7,11 @@
       "Bash(python -u stop_agent.py)",
       "Bash(echo \"Exit: $?\")",
       "Bash(python -c ' *)",
-      "Bash(timeout 5 python agent.py --auto)"
+      "Bash(timeout 5 python agent.py --auto)",
+      "Bash(python -m pytest tests/test_code_analysis_tools.py -v -k \"diff\")",
+      "Bash(python -m py_compile tools/code_analysis_tools.py)",
+      "Bash(python -m py_compile agent.py)",
+      "Bash(python *)"
     ]
   }
 }

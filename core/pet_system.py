@@ -10,7 +10,7 @@ import json
 import os
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 
 @dataclass
@@ -50,6 +50,25 @@ class PetStats:
     def __post_init__(self):
         if not self.birth_time:
             self.birth_time = datetime.now().isoformat()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "name": self.name,
+            "level": self.level,
+            "exp": self.exp,
+            "exp_to_next": self.exp_to_next,
+            "mood": self.mood,
+            "hunger": self.hunger,
+            "energy": self.energy,
+            "health": self.health,
+            "love": self.love,
+            "total_tasks": self.total_tasks,
+            "total_uptime": self.total_uptime,
+            "birth_time": self.birth_time,
+            "skills": self.skills,
+            "achievements": self.achievements,
+        }
 
 
 class LobsterPet:

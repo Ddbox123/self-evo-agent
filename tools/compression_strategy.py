@@ -64,21 +64,37 @@ class CompressionStrategy:
         """
         self.thresholds = thresholds or CompressionThresholds()
 
-        # 默认摘要字数配置
-        self._summary_chars = {
-            CompressionLevel.LIGHT: 500,
-            CompressionLevel.STANDARD: 1000,
-            CompressionLevel.DEEP: 2000,
-            CompressionLevel.EMERGENCY: 3000,
-        }
-
-        # 默认保留 AI 消息数
-        self._keep_ai_messages = {
-            CompressionLevel.LIGHT: 5,
-            CompressionLevel.STANDARD: 3,
-            CompressionLevel.DEEP: 2,
-            CompressionLevel.EMERGENCY: 1,
-        }
+        # 从配置加载默认摘要字数
+        try:
+            from config import get_config
+            cfg = get_config()
+            cc = cfg.context_compression
+            self._summary_chars = {
+                CompressionLevel.LIGHT: cc.summary_chars.light,
+                CompressionLevel.STANDARD: cc.summary_chars.standard,
+                CompressionLevel.DEEP: cc.summary_chars.deep,
+                CompressionLevel.EMERGENCY: cc.summary_chars.emergency,
+            }
+            self._keep_ai_messages = {
+                CompressionLevel.LIGHT: cc.preservation.keep_ai_messages,
+                CompressionLevel.STANDARD: max(cc.preservation.keep_ai_messages - 2, 1),
+                CompressionLevel.DEEP: max(cc.preservation.keep_ai_messages - 3, 1),
+                CompressionLevel.EMERGENCY: 1,
+            }
+        except Exception:
+            # 兜底默认值
+            self._summary_chars = {
+                CompressionLevel.LIGHT: 500,
+                CompressionLevel.STANDARD: 1000,
+                CompressionLevel.DEEP: 2000,
+                CompressionLevel.EMERGENCY: 3000,
+            }
+            self._keep_ai_messages = {
+                CompressionLevel.LIGHT: 5,
+                CompressionLevel.STANDARD: 3,
+                CompressionLevel.DEEP: 2,
+                CompressionLevel.EMERGENCY: 1,
+            }
 
     def get_config(
         self,

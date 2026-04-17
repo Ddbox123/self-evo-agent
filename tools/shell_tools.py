@@ -46,7 +46,7 @@ import locale
 import platform
 
 # ============================================================================
-# 配置常量
+# 配置常量 - 从配置文件加载
 # ============================================================================
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,30 @@ logger = logging.getLogger(__name__)
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
+
+def _load_config_defaults() -> dict:
+    """从配置加载默认常量"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        return {
+            "DEFAULT_TIMEOUT": cfg.tools.shell.default_timeout,
+            "MAX_OUTPUT_LENGTH": cfg.tools.shell.max_output_length,
+            "MAX_FILE_SIZE": cfg.tools.shell.max_file_size,
+            "DANGEROUS_PATTERNS": cfg.security.dangerous_commands,
+            "FORBIDDEN_PATTERNS": cfg.security.forbidden_patterns,
+            "FORBIDDEN_DELETE_PATTERNS": cfg.security.forbidden_delete_patterns,
+            "EDITABLE_EXTENSIONS": set(cfg.tools.file.editable_extensions),
+        }
+    except Exception:
+        # 兜底默认值
+        return {}
+
+
+_config_defaults = _load_config_defaults()
+
 # 危险命令黑名单（合并两个文件的并集）
-DANGEROUS_PATTERNS = [
+DANGEROUS_PATTERNS = _config_defaults.get("DANGEROUS_PATTERNS", [
     # 磁盘操作危险命令
     "rm -rf /",
     "rm -rf /*",
@@ -72,12 +94,12 @@ DANGEROUS_PATTERNS = [
     "shutdown",
     "sysprep",
     ":(){ :|:& };:",  # Fork bomb
-]
+])
 
 # 默认配置
-DEFAULT_TIMEOUT = 60
-MAX_OUTPUT_LENGTH = 10000
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+DEFAULT_TIMEOUT = _config_defaults.get("DEFAULT_TIMEOUT", 60)
+MAX_OUTPUT_LENGTH = _config_defaults.get("MAX_OUTPUT_LENGTH", 10000)
+MAX_FILE_SIZE = _config_defaults.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
 
 # 路径安全配置
 ALLOWED_ROOT_DIRS = [
@@ -88,24 +110,24 @@ ALLOWED_ROOT_DIRS = [
 ]
 
 # 禁止访问的文件模式
-FORBIDDEN_PATTERNS = [
+FORBIDDEN_PATTERNS = _config_defaults.get("FORBIDDEN_PATTERNS", [
     '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
-]
+])
 
 # 允许编辑的文件扩展名
-EDITABLE_EXTENSIONS = {
+EDITABLE_EXTENSIONS = _config_defaults.get("EDITABLE_EXTENSIONS", {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.kt', '.go', '.rs',
     '.c', '.cpp', '.h', '.hpp', '.rb', '.php', '.html', '.css', '.scss',
     '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.md', '.txt',
     '.sh', '.sql', '.xml', '.svg'
-}
+})
 
 # 禁止删除的文件/目录模式
-FORBIDDEN_DELETE_PATTERNS = [
+FORBIDDEN_DELETE_PATTERNS = _config_defaults.get("FORBIDDEN_DELETE_PATTERNS", [
     '.env', '.password', '.secret', '.key', 'id_rsa', 'credentials.json',
     'config.py', 'config.toml', '.git', 'restarter.py', 'agent.py',
     '__pycache__', '.pytest_cache', '.gitignore',
-]
+])
 
 # ============================================================================
 # 安全检查函数 - 双层验证（黑名单 + 白名单）

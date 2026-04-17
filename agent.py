@@ -46,6 +46,9 @@ from core.security import get_security_validator, SecurityValidator
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
+# 导入模型动态发现
+from core.model_discovery import ModelDiscovery, DiscoveryStatus
+
 # 导入工具
 from tools import Key_Tools
 from tools.token_manager import EnhancedTokenCompressor, estimate_messages_tokens
@@ -133,15 +136,90 @@ class SelfEvolvingAgent:
                 "请在 config.toml 中配置: [llm] api_key = 'your-api-key'"
             )
 
+        # =========================================================================
+        # 本地 Provider 自动切换
+        # =========================================================================
+        if self.config.llm.provider == "local":
+            local_config = self.config.llm_local
+            # 自动使用本地配置覆盖 LLM 配置
+            self.config.llm.api_base = local_config.url
+            self.config.llm.model_name = local_config.model
+            if local_config.require_api_key:
+                self.config.llm.api_key = local_config.api_key or "dummy"
+            else:
+                self.config.llm.api_key = "not-required"
+            _debug_logger.info(
+                f"[Local Provider] URL: {local_config.url}, Model: {local_config.model}",
+                tag="LLM"
+            )
+
         # 创建主要工具
         self.key_tools = Key_Tools.create_key_tools()
         self.key_tool_maps = {tool.name for tool in self.key_tools}
+
+        # =========================================================================
+        # 模型动态发现（运行时获取 max_model_len）
+        # =========================================================================
+        self.model_info = None
+        if getattr(self.config.llm, 'discovery_auto_discover', True):
+            discovery = ModelDiscovery(
+                api_base=self.config.llm.api_base,
+                model_name=self.config.llm.model_name,
+                timeout=getattr(self.config.llm, 'discovery_timeout', 30),
+                enabled=True,
+            )
+            # 设置 fallback 值
+            discovery.set_fallback(
+                max_tokens=self.config.llm.max_tokens,
+                max_token_limit=getattr(self.config.context_compression, 'max_token_limit', 16000),
+            )
+            try:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                self.model_info = loop.run_until_complete(discovery.discover())
+
+                if self.model_info.status == DiscoveryStatus.SUCCESS:
+                    _debug_logger.success(
+                        f"模型发现成功: {self.model_info.model_name}\n"
+                        f"  context_window: {self.model_info.max_model_len}\n"
+                        f"  建议 max_tokens: {self.model_info.suggested_max_tokens}\n"
+                        f"  压缩阈值 max_token_limit: {self.model_info.compression_thresholds.max_token_limit}",
+                        tag="MODEL_DISCOVERY"
+                    )
+                    # 使用动态发现的值
+                    effective_max_tokens = self.model_info.suggested_max_tokens
+                    effective_max_token_limit = self.model_info.compression_thresholds.max_token_limit
+                else:
+                    _debug_logger.warning(
+                        f"模型发现失败: {self.model_info.error_message or '未知错误'}，使用配置文件的值",
+                        tag="MODEL_DISCOVERY"
+                    )
+                    effective_max_tokens = self.config.llm.max_tokens
+                    effective_max_token_limit = getattr(
+                        self.config.context_compression, 'max_token_limit', 16000
+                    )
+            except Exception as e:
+                _debug_logger.warning(f"模型发现异常: {e}，使用配置文件的值", tag="MODEL_DISCOVERY")
+                effective_max_tokens = self.config.llm.max_tokens
+                effective_max_token_limit = getattr(
+                    self.config.context_compression, 'max_token_limit', 16000
+                )
+        else:
+            effective_max_tokens = self.config.llm.max_tokens
+            effective_max_token_limit = getattr(
+                self.config.context_compression, 'max_token_limit', 16000
+            )
 
         # 创建 LLM
         llm_kwargs = {
             "model": self.config.llm.model_name,
             "temperature": self.config.llm.temperature,
             "api_key": self.api_key,
+            "max_tokens": effective_max_tokens,  # 使用动态发现的值
         }
         if self.config.llm.api_base:
             llm_kwargs["base_url"] = self.config.llm.api_base
@@ -178,14 +256,14 @@ class SelfEvolvingAgent:
 
         self.compression_llm = ChatOpenAI(**compression_llm_kwargs)
 
-        # Token 压缩器
+        # Token 压缩器（使用动态发现的 max_token_limit）
         import os
         summary_prompt_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "workspace", "prompts", "COMPRESS_SUMMARY.md"
         )
         self.token_compressor = EnhancedTokenCompressor(
-            token_budget=self.config.context_compression.max_token_limit,
+            token_budget=effective_max_token_limit,  # 使用动态发现的值
             max_history_pairs=self.config.context_compression.keep_recent_steps,
             compression_llm=self.compression_llm,
             enable_preemptive=True,
@@ -469,17 +547,16 @@ class SelfEvolvingAgent:
         # 安全阈值
         preemptive_threshold = int(max_budget * 0.6)
         forced_threshold = int(max_budget * 0.8)
-        critical_threshold = int(max_budget * 0.9)
-
-        # 防止无限压缩：如果迭代次数过多，跳过压缩保护
-        if iteration > self.config.agent.max_iterations * 0.5:
-            _debug_logger.warning(f"[Token] 迭代过多 ({iteration})，跳过压缩", tag="TOKEN")
-            return messages
+        critical_threshold = int(max_budget * 0.95)  # 紧急压缩阈值 95%
 
         # 获取压缩计数
         compression_count = getattr(self, '_compression_count', 0)
-        max_compressions = getattr(self.config.context_compression, 'max_compressions_per_session', 5)
-        if compression_count >= max_compressions:
+        max_compressions = getattr(self.config.context_compression, 'max_compressions_per_session', 20)
+
+        # 紧急情况（超过95%）不受压缩次数限制
+        is_emergency = current_tokens > critical_threshold
+
+        if compression_count >= max_compressions and not is_emergency:
             _debug_logger.warning(f"[Token] 压缩次数已达上限 ({compression_count}/{max_compressions})，跳过", tag="TOKEN")
             return messages
 
@@ -487,7 +564,7 @@ class SelfEvolvingAgent:
         ratio = current_tokens / max_budget if max_budget > 0 else 0
 
         if current_tokens > critical_threshold:
-            # 紧急压缩
+            # 紧急压缩（不受次数限制）
             _debug_logger.warning(f"[压缩-紧急] Token 危险 ({current_tokens}/{max_budget} = {ratio:.1%})", tag="TOKEN")
             messages = self._compress_context(messages, level="emergency")
         elif current_tokens > forced_threshold:
@@ -1002,16 +1079,20 @@ def main(initial_prompt: str = None):
 
     args = parse_args()
 
-    config = Config(
-        config_path=args.config_path,
-        **{k: v for k, v in {
-            'llm.model_name': args.model_name,
-            'llm.temperature': args.temperature,
-            'agent.awake_interval': args.awake_interval,
-            'agent.name': args.name,
-            'log.level': args.log_level,
-        }.items() if v is not None}
-    )
+    # 构建配置参数（支持下划线格式 kwargs）
+    config_kwargs = {}
+    if args.model_name is not None:
+        config_kwargs['llm_model_name'] = args.model_name
+    if args.temperature is not None:
+        config_kwargs['llm_temperature'] = args.temperature
+    if args.awake_interval is not None:
+        config_kwargs['agent_awake_interval'] = args.awake_interval
+    if args.name is not None:
+        config_kwargs['agent_name'] = args.name
+    if args.log_level is not None:
+        config_kwargs['log_level'] = args.log_level
+
+    config = Config(config_path=args.config_path, **config_kwargs)
 
     setup_logging(level=config.log.level)
 

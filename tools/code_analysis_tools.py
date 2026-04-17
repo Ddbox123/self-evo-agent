@@ -562,29 +562,31 @@ def _find_similar_snippet(content: str, search_block: str, context_lines: int = 
         return ""
     
     best_match = None
+    best_match_start = 0
     best_ratio = 0
-    
+
     for i in range(len(content_lines)):
         snippet_lines = content_lines[i:i + len(search_key_lines)]
         if len(snippet_lines) < len(search_key_lines):
             break
-            
+
         matches = 0
         for sl, cl in zip(search_key_lines, snippet_lines):
             if sl == cl.rstrip():
                 matches += 1
-        
+
         ratio = matches / len(search_key_lines)
         if ratio > best_ratio and ratio > 0.3:
             best_ratio = ratio
+            best_match_start = i
             start = max(0, i - 1)
             end = min(len(content_lines), i + len(search_key_lines) + context_lines)
             best_match = content_lines[start:end]
-    
+
     if best_match:
         preview_lines = []
         for idx, line in enumerate(best_match):
-            line_num = i - len(best_match) + idx + 1 if best_match else idx + 1
+            line_num = start + idx + 1  # start is 0-indexed, line numbers are 1-indexed
             display_line = line if len(line) <= 80 else line[:77] + "..."
             preview_lines.append(f"  {line_num:>4}: {display_line}")
         return f"[提示] 文件中相似的代码:\n" + "\n".join(preview_lines)

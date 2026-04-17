@@ -32,38 +32,67 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 配置常量
+# 配置常量 - 从配置文件加载
 # ============================================================================
 
+logger = logging.getLogger(__name__)
+
+
+def _load_token_defaults() -> dict:
+    """从配置加载默认常量"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        return {
+            "DEFAULT_TOKEN_BUDGET": cfg.context_compression.max_token_limit,
+            "MAX_SYSTEM_PROMPT_TOKENS": 2000,
+            "MAX_TOOL_RESULT_TOKENS": 400,
+            "MAX_HISTORY_PAIRS": cfg.context_compression.keep_recent_steps,
+            "MAX_AI_RESPONSE_CHARS": cfg.context_compression.summary_chars.standard,
+            "MAX_TOOL_NAME_CHARS": 40,
+            "MAX_USER_INPUT_CHARS": 400,
+            "COMPRESSION_TRIGGER_RATIO": cfg.context_compression.levels.light,
+            "COMPRESSION_WARNING_RATIO": 0.5,
+            "COMPRESSION_CRITICAL_RATIO": cfg.context_compression.levels.standard,
+            "COMPRESSION_TARGET_RATIO": 0.45,
+            "LIGHT_SUMMARY_CHARS": cfg.context_compression.summary_chars.light,
+            "STANDARD_SUMMARY_CHARS": cfg.context_compression.summary_chars.standard,
+            "DEEP_SUMMARY_CHARS": cfg.context_compression.summary_chars.deep,
+        }
+    except Exception:
+        return {}
+
+
+_token_defaults = _load_token_defaults()
+
 # Token 预算配置
-DEFAULT_TOKEN_BUDGET = 8000       # 默认 Token 预算
-MAX_SYSTEM_PROMPT_TOKENS = 2000   # 系统提示词最大 Token
-MAX_TOOL_RESULT_TOKENS = 400      # 单个工具结果最大 Token（优化）
-MAX_HISTORY_PAIRS = 3             # 保留的最大交互对数（优化）
+DEFAULT_TOKEN_BUDGET = _token_defaults.get("DEFAULT_TOKEN_BUDGET", 8000)
+MAX_SYSTEM_PROMPT_TOKENS = _token_defaults.get("MAX_SYSTEM_PROMPT_TOKENS", 2000)
+MAX_TOOL_RESULT_TOKENS = _token_defaults.get("MAX_TOOL_RESULT_TOKENS", 400)
+MAX_HISTORY_PAIRS = _token_defaults.get("MAX_HISTORY_PAIRS", 3)
 
 # 压缩阈值（优化 - 更激进的阈值以避免超限）
 # 基于模型 32768 context window，配置 max_token_limit = 16000
-COMPRESSION_TRIGGER_RATIO = 0.60  # 60% 时触发压缩
-COMPRESSION_WARNING_RATIO = 0.50   # 50% 时预压缩警告
-COMPRESSION_CRITICAL_RATIO = 0.75  # 75% 时紧急压缩
-COMPRESSION_TARGET_RATIO = 0.45    # 压缩后应达到 45%
+COMPRESSION_TRIGGER_RATIO = _token_defaults.get("COMPRESSION_TRIGGER_RATIO", 0.60)
+COMPRESSION_WARNING_RATIO = _token_defaults.get("COMPRESSION_WARNING_RATIO", 0.50)
+COMPRESSION_CRITICAL_RATIO = _token_defaults.get("COMPRESSION_CRITICAL_RATIO", 0.80)
+COMPRESSION_TARGET_RATIO = _token_defaults.get("COMPRESSION_TARGET_RATIO", 0.45)
 
 # 摘要配置
-MINIMAL_SUMMARY_CHARS = 80        # 极简摘要最大字符数
-CORE_SUMMARY_CHARS = 200          # 核心摘要最大字符数（优化）
-DETAILED_SUMMARY_CHARS = 500      # 详细摘要最大字符数
-# 新增：动态摘要配置
-LIGHT_SUMMARY_CHARS = 500         # 轻度压缩摘要字数
-STANDARD_SUMMARY_CHARS = 1000    # 标准压缩摘要字数
-DEEP_SUMMARY_CHARS = 2000        # 深度压缩摘要字数
+MINIMAL_SUMMARY_CHARS = 80
+CORE_SUMMARY_CHARS = 200
+DETAILED_SUMMARY_CHARS = 500
+LIGHT_SUMMARY_CHARS = _token_defaults.get("LIGHT_SUMMARY_CHARS", 500)
+STANDARD_SUMMARY_CHARS = _token_defaults.get("STANDARD_SUMMARY_CHARS", 1000)
+DEEP_SUMMARY_CHARS = _token_defaults.get("DEEP_SUMMARY_CHARS", 2000)
 
 # 截断配置
-MAX_AI_RESPONSE_CHARS = 300      # AI 响应最大字符数
-MAX_TOOL_NAME_CHARS = 40         # 工具名最大字符数
-MAX_USER_INPUT_CHARS = 400       # 用户输入最大字符数
+MAX_AI_RESPONSE_CHARS = _token_defaults.get("MAX_AI_RESPONSE_CHARS", 300)
+MAX_TOOL_NAME_CHARS = _token_defaults.get("MAX_TOOL_NAME_CHARS", 40)
+MAX_USER_INPUT_CHARS = _token_defaults.get("MAX_USER_INPUT_CHARS", 400)
 
 # 预压缩 Buffer（百分比）
-PRECOMPRESSION_BUFFER = 0.10      # 预留 10% 作为 buffer
+PRECOMPRESSION_BUFFER = 0.10
 
 
 # ============================================================================

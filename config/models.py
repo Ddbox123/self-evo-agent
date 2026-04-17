@@ -2,12 +2,19 @@
 Pydantic 数据模型定义
 
 使用 Pydantic v2 定义所有配置项的数据模型，提供严格的类型校验和验证逻辑。
+
+所有配置支持：
+1. 从 config.toml 加载
+2. 从环境变量覆盖
+3. 从字典创建
+4. 程序化修改
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from pydantic import (
     BaseModel,
@@ -16,6 +23,7 @@ from pydantic import (
     model_validator,
     computed_field,
 )
+from pydantic import ConfigDict
 
 
 # ============================================================================
@@ -29,15 +37,19 @@ class LLMConfig(BaseModel):
     Attributes:
         provider: 模型提供商 (openai, anthropic, deepseek, aliyun 等)
         model_name: 具体模型名称
-        api_key: API 密钥（可从环境变量或配置文件读取）
+        api_key: API 密钥（可从配置文件读取）
         api_base: API 端点 URL
         temperature: 采样温度，控制输出的随机性 (0.0-2.0)
         max_tokens: 最大输出 token 数
         api_timeout: API 请求超时时间（秒）
+        connect_timeout: 连接超时时间（秒）
+        discovery: 模型动态发现配置
     """
+    model_config = ConfigDict(extra="ignore")
+
     provider: str = Field(
         default="aliyun",
-        description="LLM 提供商: openai, anthropic, deepseek, aliyun, google, ollama 等"
+        description="LLM 提供商: openai, anthropic, deepseek, aliyun, google, ollama, local 等"
     )
     model_name: str = Field(
         default="qwen-plus",
@@ -60,12 +72,17 @@ class LLMConfig(BaseModel):
     max_tokens: int = Field(
         default=4096,
         gt=0,
-        description="最大输出 token 数"
+        description="最大输出 token 数（会被运行时动态发现覆盖）"
     )
     api_timeout: int = Field(
         default=60,
         gt=0,
         description="API 请求超时时间（秒）"
+    )
+    connect_timeout: int = Field(
+        default=30,
+        gt=0,
+        description="连接超时时间（秒）"
     )
 
     @field_validator("provider")
@@ -74,10 +91,9 @@ class LLMConfig(BaseModel):
         """验证提供商名称"""
         valid_providers = [
             "openai", "anthropic", "deepseek", "aliyun",
-            "google", "zhipu", "ollama", "siliconflow", "groq"
+            "google", "zhipu", "ollama", "siliconflow", "groq", "local"
         ]
         if v.lower() not in valid_providers:
-            # 允许自定义提供商但发出警告
             pass
         return v.lower()
 
@@ -88,6 +104,89 @@ class LLMConfig(BaseModel):
         if not 0.0 <= v <= 2.0:
             raise ValueError(f"Temperature must be between 0.0 and 2.0, got {v}")
         return round(v, 2)
+
+
+class LLMDiscoveryConfig(BaseModel):
+    """LLM 动态发现配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用运行时模型发现"
+    )
+    timeout: int = Field(
+        default=30,
+        gt=0,
+        description="发现请求超时（秒）"
+    )
+    fallback_max_tokens: Optional[int] = Field(
+        default=None,
+        description="发现失败时使用的 max_tokens"
+    )
+    fallback_max_token_limit: Optional[int] = Field(
+        default=None,
+        description="发现失败时使用的 max_token_limit"
+    )
+    auto_adjust: bool = Field(
+        default=True,
+        description="是否自动调整压缩阈值"
+    )
+    output_reserve_ratio: float = Field(
+        default=0.125,
+        ge=0.1,
+        le=0.5,
+        description="预留输出 tokens 比例"
+    )
+
+
+class LocalLLMConfig(BaseModel):
+    """本地部署 LLM 配置（当 provider = "local" 时生效）"""
+    model_config = ConfigDict(extra="ignore")
+
+    url: str = Field(
+        default="http://localhost:11434/v1",
+        description="本地服务 URL（Ollama, LM Studio, vLLM 等）"
+    )
+    model: str = Field(
+        default="qwen2.5:7b",
+        description="本地模型名称"
+    )
+    require_api_key: bool = Field(
+        default=False,
+        description="是否需要 API Key"
+    )
+    api_key: str = Field(
+        default="",
+        description="本地 API Key（如果需要）"
+    )
+    streaming: bool = Field(
+        default=True,
+        description="是否启用流式响应"
+    )
+    context_window: int = Field(
+        default=8192,
+        gt=0,
+        description="上下文窗口大小（自动发现失败时使用）"
+    )
+    auto_detect_model: bool = Field(
+        default=True,
+        description="是否自动检测可用模型"
+    )
+    model_refresh_interval: int = Field(
+        default=300,
+        gt=0,
+        description="模型列表刷新间隔（秒）"
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="连接失败重试次数"
+    )
+    retry_delay: float = Field(
+        default=1.0,
+        ge=0,
+        description="重试间隔（秒）"
+    )
 
 
 # ============================================================================
@@ -107,7 +206,10 @@ class AgentConfig(BaseModel):
         auto_backup: 是否启用自动备份
         backup_interval: 自动备份间隔（秒）
         auto_restart_threshold: 自动重启阈值（错误次数），0 表示禁用
+        exploration_mode: 是否启用探索模式
     """
+    model_config = ConfigDict(extra="ignore")
+
     name: str = Field(
         default="SelfEvolvingAgent",
         description="Agent 名称"
@@ -145,6 +247,10 @@ class AgentConfig(BaseModel):
         ge=0,
         description="自动重启阈值，0 表示禁用"
     )
+    exploration_mode: bool = Field(
+        default=False,
+        description="是否启用探索模式"
+    )
 
     @field_validator("awake_interval", "max_iterations", "backup_interval")
     @classmethod
@@ -159,6 +265,85 @@ class AgentConfig(BaseModel):
 # 上下文压缩配置
 # ============================================================================
 
+class CompressionLevelsConfig(BaseModel):
+    """压缩级别阈值配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    light: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="轻度压缩阈值（相对于 max_token_limit）"
+    )
+    standard: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="标准压缩阈值"
+    )
+    deep: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="深度压缩阈值"
+    )
+    emergency: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="紧急压缩阈值"
+    )
+
+
+class CompressionSummaryCharsConfig(BaseModel):
+    """各压缩级别摘要字数配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    light: int = Field(
+        default=500,
+        ge=0,
+        description="轻度压缩摘要字数"
+    )
+    standard: int = Field(
+        default=1000,
+        ge=0,
+        description="标准压缩摘要字数"
+    )
+    deep: int = Field(
+        default=2000,
+        ge=0,
+        description="深度压缩摘要字数"
+    )
+    emergency: int = Field(
+        default=3000,
+        ge=0,
+        description="紧急压缩摘要字数"
+    )
+
+
+class CompressionPreservationConfig(BaseModel):
+    """智能保留策略配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    keep_ai_messages: int = Field(
+        default=5,
+        ge=0,
+        description="保留最近 AI 消息数"
+    )
+    keep_tool_results: bool = Field(
+        default=True,
+        description="保留工具调用结果"
+    )
+    preserve_errors: bool = Field(
+        default=True,
+        description="保留错误信息"
+    )
+    extract_key_decisions: bool = Field(
+        default=True,
+        description="提取关键决策"
+    )
+
+
 class ContextCompressionConfig(BaseModel):
     """
     运行时上下文压缩配置
@@ -169,7 +354,12 @@ class ContextCompressionConfig(BaseModel):
         keep_recent_steps: 保留最近的工具调用次数
         summary_max_chars: 压缩摘要的最大字符数
         compression_model: 用于压缩的模型名称
+        compression_temperature: 压缩用模型温度
+        max_compressions_per_session: 每会话最大压缩次数
+        effectiveness_threshold: 压缩效率阈值
     """
+    model_config = ConfigDict(extra="ignore")
+
     enabled: bool = Field(
         default=True,
         description="是否启用上下文压缩"
@@ -193,6 +383,35 @@ class ContextCompressionConfig(BaseModel):
         default="qwen-turbo",
         description="用于压缩的轻量模型"
     )
+    compression_temperature: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=2.0,
+        description="压缩用模型温度"
+    )
+    max_compressions_per_session: int = Field(
+        default=20,
+        ge=0,
+        description="每会话最大压缩次数"
+    )
+    effectiveness_threshold: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="压缩效率阈值"
+    )
+    levels: CompressionLevelsConfig = Field(
+        default_factory=CompressionLevelsConfig,
+        description="压缩级别阈值配置"
+    )
+    summary_chars: CompressionSummaryCharsConfig = Field(
+        default_factory=CompressionSummaryCharsConfig,
+        description="各压缩级别摘要字数配置"
+    )
+    preservation: CompressionPreservationConfig = Field(
+        default_factory=CompressionPreservationConfig,
+        description="智能保留策略配置"
+    )
 
     @model_validator(mode="after")
     def validate_limits(self) -> "ContextCompressionConfig":
@@ -205,32 +424,198 @@ class ContextCompressionConfig(BaseModel):
 
 
 # ============================================================================
-# 工具配置
+# 形象配置
 # ============================================================================
 
-class ToolConfig(BaseModel):
-    """
-    工具模块配置
+class AvatarConfig(BaseModel):
+    """ASCII 形象配置"""
+    model_config = ConfigDict(extra="ignore")
 
-    Attributes:
-        web_search_enabled: 是否启用网络搜索
-        file_edit_enabled: 是否启用文件编辑
-        syntax_check_enabled: 是否启用语法检查
-        restart_enabled: 是否允许 Agent 自我重启
-        allowed_directories: 允许访问的目录列表
-        forbidden_patterns: 禁止访问的文件模式
-    """
-    web_search_enabled: bool = Field(
-        default=True,
-        description="是否启用网络搜索"
+    preset: str = Field(
+        default="lobster",
+        description="预设形象: lobster(龙虾), shrimp(小虾米), crab(小螃蟹), cat(猫猫), chick(小鸡)"
     )
-    file_edit_enabled: bool = Field(
+
+
+# ============================================================================
+# 文件操作配置
+# ============================================================================
+
+class ToolsFileConfig(BaseModel):
+    """文件操作工具配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    edit_enabled: bool = Field(
         default=True,
         description="是否启用文件编辑"
+    )
+    create_enabled: bool = Field(
+        default=True,
+        description="是否启用文件创建"
     )
     syntax_check_enabled: bool = Field(
         default=True,
         description="是否启用语法检查"
+    )
+    max_read_lines: int = Field(
+        default=0,
+        ge=0,
+        description="单次读取最大行数（0 表示无限制）"
+    )
+    max_read_chars: int = Field(
+        default=0,
+        ge=0,
+        description="单次读取最大字符数（0 表示无限制）"
+    )
+    encoding_priority: List[str] = Field(
+        default_factory=lambda: ["utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"],
+        description="文件编码自动检测顺序"
+    )
+    editable_extensions: List[str] = Field(
+        default_factory=lambda: [
+            ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".kt", ".go", ".rs",
+            ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".html", ".css", ".scss",
+            ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".md", ".txt",
+            ".sh", ".sql", ".xml", ".svg"
+        ],
+        description="允许编辑的文件扩展名"
+    )
+
+
+# ============================================================================
+# Shell 命令配置
+# ============================================================================
+
+class ToolsShellConfig(BaseModel):
+    """Shell 命令工具配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用 Shell 执行"
+    )
+    default_timeout: int = Field(
+        default=60,
+        gt=0,
+        description="默认超时时间（秒）"
+    )
+    max_output_length: int = Field(
+        default=10000,
+        gt=0,
+        description="最大输出长度（字符）"
+    )
+    max_file_size: int = Field(
+        default=10485760,
+        gt=0,
+        description="最大文件大小（字节）"
+    )
+    safety_check: bool = Field(
+        default=True,
+        description="是否启用安全检查"
+    )
+    dangerous_pattern_check: bool = Field(
+        default=True,
+        description="危险命令黑名单检测"
+    )
+    allowed_shells: List[str] = Field(
+        default_factory=lambda: ["powershell", "cmd", "bash"],
+        description="允许的 Shell 类型"
+    )
+
+
+# ============================================================================
+# 搜索工具配置
+# ============================================================================
+
+class ToolsSearchConfig(BaseModel):
+    """搜索工具配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    max_file_size: int = Field(
+        default=10485760,
+        gt=0,
+        description="搜索最大文件大小（字节）"
+    )
+    max_matches_per_file: int = Field(
+        default=100,
+        gt=0,
+        description="每个文件最大匹配数"
+    )
+    max_results: int = Field(
+        default=500,
+        gt=0,
+        description="最大总结果数"
+    )
+    context_lines: int = Field(
+        default=3,
+        ge=0,
+        description="上下文行数"
+    )
+    skip_directories: List[str] = Field(
+        default_factory=lambda: [
+            "__pycache__", ".git", ".svn", ".hg", "node_modules",
+            ".venv", "venv", "env", ".env", ".idea", ".vscode",
+            "dist", "build", ".tox", ".pytest_cache", ".mypy_cache",
+            "site-packages", "egg-info", ".eggs"
+        ],
+        description="搜索时跳过的目录"
+    )
+    skip_extensions: List[str] = Field(
+        default_factory=lambda: [".exe", ".dll", ".so", ".dylib", ".pyc", ".pyo", ".pyd"],
+        description="搜索时跳过的文件扩展名"
+    )
+    include_extensions: List[str] = Field(
+        default_factory=lambda: [
+            ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".json", ".yaml",
+            ".yml", ".toml", ".txt", ".html", ".css", ".xml", ".sh", ".bat", ".ps1"
+        ],
+        description="搜索时包含的文件扩展名"
+    )
+
+
+# ============================================================================
+# 网络工具配置
+# ============================================================================
+
+class ToolsWebConfig(BaseModel):
+    """网络工具配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    search_enabled: bool = Field(
+        default=True,
+        description="是否启用网络搜索"
+    )
+    max_search_results: int = Field(
+        default=10,
+        gt=0,
+        description="搜索结果数量"
+    )
+    search_timeout: int = Field(
+        default=30,
+        gt=0,
+        description="搜索超时（秒）"
+    )
+
+
+# ============================================================================
+# 工具配置
+# ============================================================================
+
+class ToolConfig(BaseModel):
+    """工具模块配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    web_search_enabled: bool = Field(
+        default=True,
+        description="是否启用网络搜索（向后兼容）"
+    )
+    file_edit_enabled: bool = Field(
+        default=True,
+        description="是否启用文件编辑（向后兼容）"
+    )
+    syntax_check_enabled: bool = Field(
+        default=True,
+        description="是否启用语法检查（向后兼容）"
     )
     restart_enabled: bool = Field(
         default=True,
@@ -246,6 +631,22 @@ class ToolConfig(BaseModel):
             "id_rsa", "credentials.json"
         ],
         description="禁止访问的文件模式"
+    )
+    file: ToolsFileConfig = Field(
+        default_factory=ToolsFileConfig,
+        description="文件操作配置"
+    )
+    shell: ToolsShellConfig = Field(
+        default_factory=ToolsShellConfig,
+        description="Shell 命令配置"
+    )
+    search: ToolsSearchConfig = Field(
+        default_factory=ToolsSearchConfig,
+        description="搜索工具配置"
+    )
+    web: ToolsWebConfig = Field(
+        default_factory=ToolsWebConfig,
+        description="网络工具配置"
     )
 
     @model_validator(mode="after")
@@ -263,20 +664,67 @@ class ToolConfig(BaseModel):
 
 
 # ============================================================================
+# 安全配置
+# ============================================================================
+
+class SecurityConfig(BaseModel):
+    """安全配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用安全验证"
+    )
+    allowed_directories: List[str] = Field(
+        default_factory=list,
+        description="允许访问的根目录"
+    )
+    forbidden_patterns: List[str] = Field(
+        default_factory=lambda: [
+            ".env", ".password", ".secret", ".key",
+            "id_rsa", "credentials.json"
+        ],
+        description="禁止访问的文件模式"
+    )
+    forbidden_delete_patterns: List[str] = Field(
+        default_factory=lambda: [
+            ".env", ".password", ".secret", ".key", "id_rsa", "credentials.json",
+            "config.py", "config.toml", ".git", "restarter.py", "agent.py"
+        ],
+        description="禁止删除的文件/目录"
+    )
+    dangerous_commands: List[str] = Field(
+        default_factory=lambda: [
+            "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero of=/dev/sda",
+            "format", "del /f /s /q", "rmdir /s /q", "rm -rf",
+            "cipher /w:", "shutdown", "sysprep", ":(){ :|:& };:"
+        ],
+        description="危险命令黑名单"
+    )
+
+
+# ============================================================================
 # 日志配置
 # ============================================================================
 
-class LogConfig(BaseModel):
-    """
-    日志系统配置
+class LogThirdPartyConfig(BaseModel):
+    """第三方库日志级别配置"""
+    model_config = ConfigDict(extra="ignore")
 
-    Attributes:
-        level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        format: 日志格式字符串
-        date_format: 日期时间格式
-        file_enabled: 是否写入文件
-        file_path: 日志文件路径
-    """
+    httpx: str = Field(default="WARNING")
+    httpcore: str = Field(default="WARNING")
+    langchain: str = Field(default="WARNING")
+    openai: str = Field(default="WARNING")
+    anthropic: str = Field(default="WARNING")
+    urllib3: str = Field(default="WARNING")
+    litellm: str = Field(default="WARNING")
+    rich: str = Field(default="WARNING")
+
+
+class LogConfig(BaseModel):
+    """日志系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
     level: str = Field(
         default="INFO",
         description="日志级别"
@@ -297,6 +745,24 @@ class LogConfig(BaseModel):
         default="logs/agent.log",
         description="日志文件路径"
     )
+    max_file_size: int = Field(
+        default=10485760,
+        ge=0,
+        description="最大日志文件大小（字节）"
+    )
+    backup_count: int = Field(
+        default=5,
+        ge=0,
+        description="保留的日志文件数量"
+    )
+    detailed_traceback: bool = Field(
+        default=False,
+        description="是否启用详细错误堆栈"
+    )
+    third_party: LogThirdPartyConfig = Field(
+        default_factory=LogThirdPartyConfig,
+        description="第三方库日志级别"
+    )
 
     @field_validator("level")
     @classmethod
@@ -314,14 +780,9 @@ class LogConfig(BaseModel):
 # ============================================================================
 
 class NetworkConfig(BaseModel):
-    """
-    网络请求配置
+    """网络请求配置"""
+    model_config = ConfigDict(extra="ignore")
 
-    Attributes:
-        timeout: 请求超时时间（秒）
-        user_agent: HTTP User-Agent 头
-        max_retries: 最大重试次数
-    """
     timeout: int = Field(
         default=30,
         gt=0,
@@ -335,6 +796,215 @@ class NetworkConfig(BaseModel):
         default=3,
         ge=0,
         description="最大重试次数"
+    )
+    retry_delay: float = Field(
+        default=1.0,
+        ge=0,
+        description="重试延迟（秒）"
+    )
+    verify_ssl: bool = Field(
+        default=True,
+        description="是否验证 SSL 证书"
+    )
+
+
+# ============================================================================
+# 进化引擎配置
+# ============================================================================
+
+class EvolutionConfig(BaseModel):
+    """进化引擎配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用自动进化"
+    )
+    config_path: str = Field(
+        default="workspace/evolution_config.json",
+        description="进化配置路径"
+    )
+    archive_dir: str = Field(
+        default="workspace/archives",
+        description="归档目录"
+    )
+    backup_dir: str = Field(
+        default="backups",
+        description="备份目录"
+    )
+    test_gate_enabled: bool = Field(
+        default=True,
+        description="是否在重启前运行测试"
+    )
+    test_gate_timeout: int = Field(
+        default=120,
+        gt=0,
+        description="进化测试超时（秒）"
+    )
+    test_command: str = Field(
+        default="pytest tests/ -v --tb=short -q",
+        description="测试命令"
+    )
+
+
+# ============================================================================
+# 记忆系统配置
+# ============================================================================
+
+class MemoryConfig(BaseModel):
+    """记忆系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    storage_dir: str = Field(
+        default="workspace/memory",
+        description="记忆存储目录"
+    )
+    memory_file: str = Field(
+        default="memory.json",
+        description="记忆文件名称"
+    )
+    archive_dir: str = Field(
+        default="workspace/memory/archives",
+        description="归档目录"
+    )
+    max_entries: int = Field(
+        default=1000,
+        gt=0,
+        description="最大记忆条目数"
+    )
+
+
+# ============================================================================
+# 策略系统配置
+# ============================================================================
+
+class StrategyConfig(BaseModel):
+    """策略系统配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    data_dir: str = Field(
+        default="workspace/strategy",
+        description="策略数据目录"
+    )
+    exploration_rate: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="探索率"
+    )
+    learning_enabled: bool = Field(
+        default=True,
+        description="是否启用策略学习"
+    )
+    learning_data_path: str = Field(
+        default="workspace/strategy/learner_data.json",
+        description="学习数据存储路径"
+    )
+
+
+# ============================================================================
+# 代码分析配置
+# ============================================================================
+
+class AnalysisConfig(BaseModel):
+    """代码分析配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    data_dir: str = Field(
+        default="workspace/analytics",
+        description="分析数据目录"
+    )
+    feedback_dir: str = Field(
+        default="workspace/feedback",
+        description="反馈数据目录"
+    )
+    knowledge_graph_path: str = Field(
+        default="workspace/knowledge_graph.json",
+        description="知识图谱存储路径"
+    )
+    pattern_library_path: str = Field(
+        default="workspace/pattern_library.json",
+        description="模式库存储路径"
+    )
+
+
+# ============================================================================
+# CLI UI 配置
+# ============================================================================
+
+class UIConfig(BaseModel):
+    """CLI UI 配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    theme: str = Field(
+        default="lobster",
+        description="主题名称"
+    )
+    max_log_entries: int = Field(
+        default=100,
+        gt=0,
+        description="日志面板最大条目数"
+    )
+    refresh_rate: int = Field(
+        default=4,
+        gt=0,
+        description="实时刷新频率"
+    )
+    show_ascii_art: bool = Field(
+        default=True,
+        description="是否显示 ASCII Art"
+    )
+    show_welcome: bool = Field(
+        default=True,
+        description="是否显示欢迎面板"
+    )
+
+
+# ============================================================================
+# 调试配置
+# ============================================================================
+
+class DebugConfig(BaseModel):
+    """调试配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用调试模式"
+    )
+    verbose: bool = Field(
+        default=False,
+        description="是否打印详细日志"
+    )
+    trace_llm: bool = Field(
+        default=False,
+        description="是否跟踪 LLM 调用"
+    )
+    trace_tools: bool = Field(
+        default=False,
+        description="是否跟踪工具调用"
+    )
+    track_token_usage: bool = Field(
+        default=True,
+        description="Token 使用统计"
+    )
+
+
+# ============================================================================
+# 兼容性配置
+# ============================================================================
+
+class CompatConfig(BaseModel):
+    """向后兼容配置"""
+    model_config = ConfigDict(extra="ignore")
+
+    legacy_api_enabled: bool = Field(
+        default=True,
+        description="启用旧版 API"
+    )
+    legacy_config_path: str = Field(
+        default="config.py",
+        description="旧版配置路径"
     )
 
 
@@ -359,14 +1029,27 @@ class AppConfig(BaseModel):
         config.llm.model_name = "gpt-4"
         print(config.llm.temperature)
     """
+    model_config = ConfigDict(extra="ignore")
+
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    llm_discovery: LLMDiscoveryConfig = Field(default_factory=LLMDiscoveryConfig)
+    llm_local: LocalLLMConfig = Field(default_factory=LocalLLMConfig)
+    avatar: AvatarConfig = Field(default_factory=AvatarConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     context_compression: ContextCompressionConfig = Field(
         default_factory=ContextCompressionConfig
     )
     tools: ToolConfig = Field(default_factory=ToolConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     log: LogConfig = Field(default_factory=LogConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
+    evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
+    compat: CompatConfig = Field(default_factory=CompatConfig)
 
     @computed_field
     @property
@@ -374,6 +1057,19 @@ class AppConfig(BaseModel):
         """获取工作区的绝对路径"""
         project_root = Path(__file__).parent.parent
         return project_root / self.agent.workspace
+
+    @computed_field
+    @property
+    def effective_api_base(self) -> Optional[str]:
+        """
+        获取实际的 API 端点
+
+        当 provider = "local" 时，使用 llm_local.url；
+        否则使用 llm.api_base。
+        """
+        if self.llm.provider == "local":
+            return self.llm_local.url
+        return self.llm.api_base
 
     def model_dump_simple(self) -> dict:
         """
@@ -401,34 +1097,6 @@ class AppConfig(BaseModel):
             "log_level": self.log.level,
         }
 
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        转换为字典（向后兼容）
-
-        Returns:
-            配置字典
-        """
-        data = self.model_dump()
-        return {
-            'llm': {
-                'provider': data['llm']['provider'],
-                'model_name': data['llm']['model_name'],
-                'temperature': data['llm']['temperature'],
-                'max_tokens': data['llm']['max_tokens'],
-                'api_base': data['llm']['api_base'],
-                'api_timeout': data['llm']['api_timeout'],
-            },
-            'agent': {
-                'name': data['agent']['name'],
-                'awake_interval': data['agent']['awake_interval'],
-                'max_iterations': data['agent']['max_iterations'],
-                'auto_backup': data['agent']['auto_backup'],
-            },
-            'log': {
-                'level': data['log']['level'],
-            },
-        }
-
     def get_api_key(self) -> Optional[str]:
         """
         获取 API Key（优先从配置读取，其次环境变量）
@@ -436,8 +1104,6 @@ class AppConfig(BaseModel):
         Returns:
             API Key，未设置返回 None
         """
-        import os
-
         # 1. 优先从配置读取
         if self.llm.api_key:
             return self.llm.api_key
@@ -483,11 +1149,46 @@ class AppConfig(BaseModel):
 # ============================================================================
 
 __all__ = [
+    # LLM 配置
     "LLMConfig",
+    "LLMDiscoveryConfig",
+    "LocalLLMConfig",
+    # Agent 配置
     "AgentConfig",
+    # 上下文压缩配置
     "ContextCompressionConfig",
+    "CompressionLevelsConfig",
+    "CompressionSummaryCharsConfig",
+    "CompressionPreservationConfig",
+    # 形象配置
+    "AvatarConfig",
+    # 工具配置
     "ToolConfig",
+    "ToolsFileConfig",
+    "ToolsShellConfig",
+    "ToolsSearchConfig",
+    "ToolsWebConfig",
+    # 安全配置
+    "SecurityConfig",
+    # 日志配置
     "LogConfig",
+    "LogThirdPartyConfig",
+    # 网络配置
     "NetworkConfig",
+    # 进化引擎配置
+    "EvolutionConfig",
+    # 记忆系统配置
+    "MemoryConfig",
+    # 策略系统配置
+    "StrategyConfig",
+    # 代码分析配置
+    "AnalysisConfig",
+    # UI 配置
+    "UIConfig",
+    # 调试配置
+    "DebugConfig",
+    # 兼容性配置
+    "CompatConfig",
+    # 主配置类
     "AppConfig",
 ]

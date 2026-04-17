@@ -17,18 +17,45 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# 配置常量 - 从配置文件加载
+# ============================================================================
+
+
+def _load_search_defaults() -> dict:
+    """从配置加载默认常量"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        return {
+            "MAX_FILE_SIZE": cfg.tools.search.max_file_size,
+            "MAX_MATCHES_PER_FILE": cfg.tools.search.max_matches_per_file,
+            "MAX_CONTEXT_LINES": cfg.tools.search.context_lines,
+            "SKIP_DIRS": set(cfg.tools.search.skip_directories),
+            "SKIP_EXTENSIONS": set(cfg.tools.search.skip_extensions),
+            "INCLUDE_EXTENSIONS": set(cfg.tools.search.include_extensions),
+        }
+    except Exception:
+        return {}
+
+
+_search_defaults = _load_search_defaults()
+
 # 搜索配置
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MAX_MATCHES_PER_FILE = 100
-MAX_CONTEXT_LINES = 3  # 匹配行前后显示的上下文行数
-SKIP_DIRS = {
+MAX_FILE_SIZE = _search_defaults.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
+MAX_MATCHES_PER_FILE = _search_defaults.get("MAX_MATCHES_PER_FILE", 100)
+MAX_CONTEXT_LINES = _search_defaults.get("MAX_CONTEXT_LINES", 3)
+SKIP_DIRS = _search_defaults.get("SKIP_DIRS", {
     '__pycache__', '.git', '.svn', '.hg', 'node_modules',
     '.venv', 'venv', 'env', '.env', '.idea', '.vscode',
     'dist', 'build', '.tox', '.pytest_cache', '.mypy_cache',
     'site-packages', 'egg-info', '.eggs'
-}
-SKIP_EXTENSIONS = {'.exe', '.dll', '.so', '.dylib', '.pyc', '.pyo', '.pyd'}
-INCLUDE_EXTENSIONS = {'.py', '.js', '.ts', '.jsx', '.tsx', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.html', '.css', '.xml', '.sh', '.bat', '.ps1'}
+})
+SKIP_EXTENSIONS = _search_defaults.get("SKIP_EXTENSIONS", {'.exe', '.dll', '.so', '.dylib', '.pyc', '.pyo', '.pyd'})
+INCLUDE_EXTENSIONS = _search_defaults.get("INCLUDE_EXTENSIONS", {
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.html', '.css', '.xml', '.sh', '.bat', '.ps1'
+})
 
 
 def _normalize_path(file_path: str) -> Path:

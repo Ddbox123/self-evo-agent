@@ -32,7 +32,7 @@ from rich.align import Align
 from rich.text import Text
 
 # 龙虾主题
-from core.ascii_art import LobsterASCII, get_lobster_banner, get_status_lobster
+from core.ascii_art import get_avatar_manager
 from core.theme import LobsterTheme, get_theme, get_style
 from core.pet_system import get_pet
 
@@ -72,7 +72,7 @@ class UIManager:
         self._live: Optional[Live] = None
         self._current_renderable = None
         self._logs: List[str] = []
-        self._max_logs = 100
+        self._max_logs = self._load_max_logs()
         self._generation = 1
         self._current_goal = ""
         self._task_board = ""
@@ -84,10 +84,18 @@ class UIManager:
         # 龙虾主题
         self.theme = get_theme()
         self.style = get_style()
-        self.ascii = LobsterASCII()
+        self.avatar = get_avatar_manager()
 
         # 龙虾宝宝宠物
         self.pet = get_pet()
+
+    def _load_max_logs(self) -> int:
+        """从配置加载最大日志条目数"""
+        try:
+            from config import get_config
+            return get_config().ui.max_log_entries
+        except Exception:
+            return 100
 
     def _create_header(self) -> Panel:
         """创建状态头面板 - 龙虾宝宝主题"""
@@ -95,14 +103,18 @@ class UIManager:
         status_icon = self.theme.get_status_icon(self._status)
 
         # 龙虾 ASCII Art
-        lobster_art = get_status_lobster(self._status.lower())
+        lobster_art = self.avatar.get_art(self._status.lower())
+
+        # 宠物年龄
+        pet_age = self.pet.stats.level - 1
+        pet_level = self.pet.stats.level
 
         # 状态表格
         table = Table(box=None, show_header=False, padding=(0, 2))
         table.add_column(style="bold")
         table.add_column()
 
-        table.add_row(f"[bold {self.theme.LOBSTER_CYAN}]GEN[/bold {self.theme.LOBSTER_CYAN}]", f"[{self.theme.LOBSTER_CYAN}]G{self._generation}[/{self.theme.LOBSTER_CYAN}]")
+        table.add_row(f"[bold {self.theme.LOBSTER_CYAN}]AGE[/bold {self.theme.LOBSTER_CYAN}]", f"[{self.theme.LOBSTER_CYAN}]{pet_age}岁(Lv.{pet_level})[/{self.theme.LOBSTER_CYAN}]")
         table.add_row(f"[bold {self.theme.LOBSTER_ORANGE}]STATUS[/bold {self.theme.LOBSTER_ORANGE}]", f"[{status_color}]{status_icon} {self._status}[/{status_color}]")
         table.add_row(f"[bold {self.theme.LOBSTER_PINK}]TURN[/bold {self.theme.LOBSTER_PINK}]", f"[{self.theme.LOBSTER_PINK}]#{self._iterations}[/{self.theme.LOBSTER_PINK}]")
         table.add_row(f"[bold {self.theme.LOBSTER_GREEN}]TOOLS[/bold {self.theme.LOBSTER_GREEN}]", f"[{self.theme.LOBSTER_GREEN}]{self._tool_count}[/{self.theme.LOBSTER_GREEN}]")
@@ -132,10 +144,10 @@ class UIManager:
         )
 
     def _create_log_panel(self) -> Panel:
-        """创建日志面板 - 龙虾主题"""
+        """创建日志面板"""
         if not self._logs:
             return Panel(
-                f"[dim]{get_status_lobster('happy')} 等待日志...[/dim]",
+                f"[dim]{self.avatar.get_art('happy')} 等待日志...[/dim]",
                 title=f"[bold {self.theme.LOBSTER_GREEN}]📝 执行日志[/bold {self.theme.LOBSTER_GREEN}]",
                 border_style=self.theme.LOBSTER_GREEN,
                 box=ROUNDED,
@@ -186,14 +198,23 @@ class UIManager:
     def start_live(self):
         """启动 Live 刷新"""
         if self._live is None:
+            refresh_rate = self._load_refresh_rate()
             self._live = Live(
                 self._create_full_renderable(),
                 console=self.console,
-                refresh_per_second=4,
+                refresh_per_second=refresh_rate,
                 transient=False,
                 auto_refresh=False,
             )
             self._live.start()
+
+    def _load_refresh_rate(self) -> int:
+        """从配置加载刷新频率"""
+        try:
+            from config import get_config
+            return get_config().ui.refresh_rate
+        except Exception:
+            return 4
 
     def stop_live(self):
         """停止 Live 刷新"""
@@ -282,17 +303,21 @@ class UIManager:
 
     # ==================== 独立输出方法 - 龙虾主题 ====================
 
-    def print_header(self, model: str, generation: int):
+    def print_header(self, model: str, generation: int = None):
         """打印会话头 - 龙虾宝宝版"""
-        self._generation = generation
+        if generation is not None:
+            self._generation = generation
 
-        banner = get_lobster_banner("虾宝", "v3.0")
+        pet = get_pet()
+        pet_level = pet.stats.level
+        pet_age = pet_level - 1
+
+        banner = self.avatar.get_banner("Baby Claw", "v1.0", pet.stats.to_dict())
 
         header = f"""
 {banner}
 
 [cyan]模型:[/cyan] {model}
-[yellow]世代:[/yellow] G{generation}
 [green]时间:[/green] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
         self.console.print(header)
@@ -415,7 +440,7 @@ class UIManager:
             status: 状态 (happy, thinking, working, sleeping, sad)
             message: 状态消息
         """
-        lobster_art = get_status_lobster(status)
+        lobster_art = self.avatar.get_art(status)
         status_icon = self.theme.get_status_icon(status.upper())
 
         content = f"[cyan]{lobster_art}[/cyan]\n"
@@ -443,18 +468,21 @@ class UIManager:
         self.console.print(panel)
 
     def print_welcome_panel(self):
-        """打印欢迎面板 - 龙虾宝宝版"""
-        lobster = LobsterASCII.HAPPY
+        """打印欢迎面板"""
+        art = self.avatar.get_art('happy')
+        pet = get_pet()
+        pet_age = pet.stats.level - 1
+        pet_level = pet.stats.level
 
         welcome = Panel(
-            f"""{lobster}
+            f"""{art}
 
 [bold bright_red]🦞 欢迎回来，龙虾爸爸！🦞[/bold bright_red]
 
 [green]我是你的小虾宝，已经准备好为你服务啦~[/green]
 
 [cyan]📊 当前状态:[/cyan]
-  • 世代: G{self._generation}
+  • 年龄: {pet_age}岁 (Lv.{pet_level})
   • 目标: {self._current_goal[:30] if self._current_goal else '等待任务...'}
   • 状态: {self.theme.get_status_icon(self._status)} {self._status}
 
@@ -490,7 +518,7 @@ def get_ui() -> UIManager:
 
 
 # 便捷函数
-def ui_print_header(model: str, generation: int):
+def ui_print_header(model: str, generation: int = None):
     """打印会话头"""
     get_ui().print_header(model, generation)
 

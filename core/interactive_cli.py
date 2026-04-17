@@ -29,7 +29,7 @@ from rich.box import ROUNDED
 # 导入 Agent 相关
 from config import Config, get_config
 from core.cli_ui import get_ui as get_cli_ui
-from core.ascii_art import LobsterASCII, get_lobster_banner, get_status_lobster
+from core.ascii_art import AvatarManager, get_avatar_manager
 from core.theme import LobsterTheme
 from core.pet_system import get_pet
 from tools.memory_tools import get_generation_tool, get_current_goal_tool
@@ -53,7 +53,7 @@ class XuebaInteractiveCLI:
 
         # 龙虾主题
         self.theme = LobsterTheme()
-        self.ascii = LobsterASCII()
+        self.avatar = get_avatar_manager(self.config.avatar.preset)
 
         # 虾宝状态
         self.xueba_status = {
@@ -79,52 +79,115 @@ class XuebaInteractiveCLI:
             "/auto": "切换自主学习模式",
             "/feed": "喂食虾宝",
             "/play": "和虾宝玩耍",
+            "/avatar": "切换形象",
         }
 
     def print_header(self):
         """打印头部 - 龙虾宝宝主题版"""
-        banner = get_lobster_banner("虾宝", "v3.0")
-        self.console.print(banner)
+        pet = get_pet()
+        pet_data = {
+            'level': pet.stats.level,
+            'mood': pet.stats.mood,
+            'hunger': pet.stats.hunger,
+            'energy': pet.stats.energy,
+            'health': pet.stats.health,
+            'love': pet.stats.love,
+            'exp': pet.stats.exp,
+            'exp_to_next': pet.stats.exp_to_next,
+        }
+
+        # 获取 ASCII Art
+        art = self.avatar.get_art('happy')
+
+        # 构建状态文本
+        age = pet_data['level'] - 1
+        mood = pet_data['mood']
+        hunger = pet_data['hunger']
+        energy = int(pet_data['energy'])
+        health = pet_data['health']
+        love = pet_data['love']
+        exp = pet_data['exp']
+        exp_to_next = pet_data['exp_to_next']
+        level = pet_data['level']
+
+        mood_emoji = "😊" if mood > 70 else "😐" if mood > 40 else "😢"
+        hunger_emoji = "🍖" if hunger > 70 else "🍽️" if hunger > 40 else "😫"
+        energy_emoji = "⚡" if energy > 70 else "💤" if energy > 40 else "🥱"
+        health_emoji = "❤️" if health > 70 else "💔" if health > 40 else "🏥"
+        love_emoji = "💕" if love > 70 else "💗" if love > 40 else "💔"
+
+        exp_percent = exp / exp_to_next if exp_to_next > 0 else 0
+        exp_bar = "█" * int(exp_percent * 6) + "░" * (6 - int(exp_percent * 6))
+
+        # 状态信息（紧凑布局）
+        status_info = f"""[bright_red]Baby Claw[/bright_red] 🦞  Lv.{level} ({age}岁)
+
+{mood_emoji}心情 {mood}/100  {hunger_emoji}饱食 {hunger}/100  {energy_emoji}活力 {energy}/100
+{health_emoji}健康 {health}/100  {love_emoji}爱心 {love}/100  ⭐经验 [{exp_bar}]"""
+
+        # Art 和状态组合（左右布局）
+        art_lines = art.strip().split('\n')
+        status_lines = status_info.split('\n')
+
+        # Art 宽度
+        art_width = 10
+        combined = []
+        for i in range(max(len(art_lines), len(status_lines))):
+            left = art_lines[i] if i < len(art_lines) else " " * art_width
+            right = status_lines[i] if i < len(status_lines) else ""
+            combined.append(left + "  " + right)
+        content = '\n'.join(combined)
+
+        panel = Panel(
+            content,
+            title="[bold bright_red]🦞 Baby Claw[/bold bright_red]",
+            border_style="bright_cyan",
+            box=ROUNDED,
+            width=80,
+        )
+        self.console.print(panel)
 
         # 附加信息
-        info = f"""
-[cyan]模型:[/cyan] {self.config.llm.model_name}
-[yellow]世代:[/yellow] G{self.xueba_status['generation']}
-[green]时间:[/green] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """
+        info = f"""[cyan]模型:[/cyan] {self.config.llm.model_name}
+[green]时间:[/green] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         self.console.print(info)
 
     def print_welcome(self):
-        """打印欢迎信息 - 龙虾宝宝主题版"""
-        lobster = LobsterASCII.HAPPY
+        """打印欢迎信息"""
+        art = self.avatar.get_art('happy')
         pet = get_pet()
         pet_status = pet.get_status_text()
+        pet_lines = pet_status.split('\n')
+
+        # 获取年龄
+        age = pet.stats.level - 1
 
         welcome = Panel(
-            f"""{lobster}
+            f"""{art}
 
 [bold bright_red]🦞 欢迎回来，龙虾爸爸！🦞[/bold bright_red]
 
 [green]我是你的小虾宝，已经准备好为你服务啦~[/green]
 
 [cyan]📊 当前状态:[/cyan]
-  • 世代: G{self.xueba_status['generation']}
+  • 年龄: {age}岁 (Lv.{pet.stats.level})
   • 目标: {self.xueba_status['current_goal'][:38] if self.xueba_status['current_goal'] else '等待任务...'}
   • 状态: {self._get_status_emoji()} {self.xueba_status['state']}
 
-[magenta]🦞 虾宝宠物:[/magenta]
-  {pet_status.split(chr(10))[0]}
-  {pet_status.split(chr(10))[1]}
+[magenta]🦞 Baby Claw:[/magenta]
+  {pet_lines[0]}
+  {pet_lines[1]}
+  {pet_lines[2]}
 
 [yellow]🎯 快速开始:[/yellow]
   1. 直接输入任务描述，按 Enter 发送
   2. 输入 /help 查看所有命令
   3. 输入 /status 查看我的状态
-  4. 输入 /pet 查看宠物状态
+  4. 输入 /pet 查看宠物详情
 
 [dim]💡 提示：按 Ctrl+C 可以随时中断当前任务[/dim]
 """,
-            title="[bold bright_red]🦞 虾宝已就绪[/bold bright_red]",
+            title="[bold bright_red]🦞 Baby Claw[/bold bright_red]",
             border_style="bright_cyan",
             box=ROUNDED,
         )
@@ -135,7 +198,7 @@ class XuebaInteractiveCLI:
         return self.theme.get_status_icon(self.xueba_status['state'])
 
     def _get_state_lobster(self) -> str:
-        """获取状态对应的龙虾 Art"""
+        """获取状态对应的 Art"""
         state_map = {
             "IDLE": "happy",
             "THINKING": "thinking",
@@ -143,7 +206,7 @@ class XuebaInteractiveCLI:
             "SUCCESS": "success",
             "ERROR": "sad",
         }
-        return get_status_lobster(state_map.get(self.xueba_status['state'], "happy"))
+        return self.avatar.get_art(state_map.get(self.xueba_status['state'], "happy"))
 
     def print_status(self):
         """打印虾宝状态 - 龙虾宝宝主题版"""
@@ -158,21 +221,26 @@ class XuebaInteractiveCLI:
         uptime = datetime.now() - self.session_start
         self.xueba_status["uptime"] = str(uptime).split(".")[0]
 
-        # 龙虾状态 Art
-        lobster = self._get_state_lobster()
+        # 状态 Art
+        art = self._get_state_lobster()
         status_emoji = self._get_status_emoji()
+
+        # 获取宠物年龄
+        pet = get_pet()
+        pet_level = pet.stats.level
+        pet_age = pet_level - 1
 
         # 创建状态面板
         status_panel = Panel(
-            f"""{lobster}
+            f"""{art}
 
-[cyan]世代:[/cyan] G{self.xueba_status['generation']}
+[cyan]年龄:[/cyan] {pet_age}岁 (Lv.{pet_level})
 [cyan]状态:[/cyan] {status_emoji} {self.xueba_status['state']}
 [cyan]目标:[/cyan] {self.xueba_status['current_goal'][:35] if self.xueba_status['current_goal'] else '暂无'}
 [cyan]运行:[/cyan] {self.xueba_status['uptime']}
 [cyan]模式:[/cyan] {"🔄 自主" if self.xueba_status['autonomous_mode'] else "⏳ 等待"}
             """,
-            title=f"[bold bright_red]🦞 {status_emoji} 虾宝当前状态[/bold bright_red]",
+            title=f"[bold bright_red]🦞 {status_emoji} Baby Claw[/bold bright_red]",
             border_style="cyan",
             box=ROUNDED,
         )
@@ -182,11 +250,11 @@ class XuebaInteractiveCLI:
     def print_pet_status(self):
         """打印宠物状态"""
         pet = get_pet()
-        lobster = LobsterASCII.HAPPY
+        art = self.avatar.get_art('happy')
 
         status_text = pet.get_full_status()
         panel = Panel(
-            f"{lobster}\n\n{status_text}",
+            f"{art}\n\n{status_text}",
             title="[bold magenta]🦞 龙虾宝宝状态[/bold magenta]",
             border_style="bright_magenta",
             box=ROUNDED,
@@ -208,10 +276,66 @@ class XuebaInteractiveCLI:
         self.console.print("[magenta]🦞 和虾宝玩耍了！亲密度 +10，心情 +15，活力 -10[/magenta]")
         self.print_pet_status()
 
+    def switch_avatar(self, args: list = None):
+        """切换形象"""
+        presets = self.avatar.list_presets()
+
+        # 如果没有参数，显示可用形象列表
+        if not args:
+            self.console.print()
+            self.console.print(Panel(
+                f"""{self.avatar.get_art('happy')}
+
+[bold bright_green]🦞 请选择形象[/bold bright_green]
+
+可用形象:
+""",
+                title="[bold bright_green]🦞 切换形象[/bold bright_green]",
+                border_style="bright_green",
+                box=ROUNDED,
+            ))
+
+            # 显示所有可选形象
+            for key, info in presets.items():
+                current = " [green](当前)[/green]" if key == self.avatar.preset_name else ""
+                self.console.print(f"  {info['icon']} [cyan]/avatar {key}[/cyan] - {info['name']}{current}")
+
+            self.console.print()
+            self.console.print("[dim]例如: /avatar shrimp[/dim]")
+            return
+
+        # 有参数，尝试切换
+        new_preset = args[0].lower()
+
+        if new_preset not in presets:
+            self.console.print(f"[red]⚠️ 未知形象：{new_preset}[/red]")
+            self.console.print("[yellow]可用形象：[/yellow]")
+            for key in presets.keys():
+                self.console.print(f"  • {key}")
+            return
+
+        # 切换形象
+        if self.avatar.switch(new_preset):
+            info = presets[new_preset]
+            self.console.print()
+            self.console.print(Panel(
+                f"""{self.avatar.get_art('love')}
+
+[bold bright_green]✅ 形象切换成功！[/bold bright_green]
+
+{info['icon']} {info['name']} - {info['desc']}
+
+[dim]形象已更新，下次启动时将使用此形象[/dim]
+            """,
+                title=f"[bold bright_green]🦞 {info['icon']} {info['name']}[/bold bright_green]",
+                border_style="bright_green",
+                box=ROUNDED,
+            ))
+
     def print_help(self):
         """打印帮助信息 - 龙虾宝宝主题版"""
         # 龙虾装饰
-        lobster = LobsterASCII.TINY
+        tiny = self.avatar.current.TINY if hasattr(self.avatar.current, 'TINY') else self.avatar.get_art('happy')
 
         help_table = Table(
             title="[bold bright_red]🦞 可用命令列表[/bold bright_red]",
@@ -247,7 +371,7 @@ class XuebaInteractiveCLI:
         import random
         message = random.choice(love_messages)
 
-        love_art = LobsterASCII.HAPPY
+        love_art = self.avatar.get_art('love')
 
         love_panel = Panel(
             f"""{love_art}
@@ -289,9 +413,9 @@ class XuebaInteractiveCLI:
 
         if self.xueba_status['autonomous_mode']:
             status_emoji = "🔄"
-            lobster = LobsterASCII.WORKING
+            art = self.avatar.get_art('working')
             mode_panel = Panel(
-                f"""{lobster}
+                f"""{art}
 
 [bold bright_green]🔄 自主学习模式已开启！[/bold bright_green]
 
@@ -311,9 +435,9 @@ class XuebaInteractiveCLI:
             )
         else:
             status_emoji = "⏳"
-            lobster = LobsterASCII.HAPPY
+            art = self.avatar.get_art('happy')
             mode_panel = Panel(
-                f"""{lobster}
+                f"""{art}
 
 [dim]⏳ 自主学习模式已关闭[/dim]
 
@@ -365,7 +489,7 @@ class XuebaInteractiveCLI:
         """发送任务给虾宝"""
         self.console.print()
 
-        lobster = LobsterASCII.THINKING
+        art = self.avatar.get_art('thinking')
 
         with Progress(
             SpinnerColumn(spinner_name="dots"),
@@ -379,7 +503,7 @@ class XuebaInteractiveCLI:
 
         self.console.print()
         self.console.print(Panel(
-            f"""{lobster}
+            f"""{art}
 
 [bold bright_green]✅ 任务已接收[/bold bright_green]
 
@@ -455,6 +579,8 @@ class XuebaInteractiveCLI:
             self.feed_pet()
         elif cmd == '/play':
             self.play_with_pet()
+        elif cmd == '/avatar':
+            self.switch_avatar(args)
         elif cmd in ['/quit', '/exit', '/q']:
             if Confirm.ask("[bold]确定要退出吗？[/bold]"):
                 self.running = False
@@ -471,7 +597,7 @@ class XuebaInteractiveCLI:
             self.run_interactive_loop()
 
             # 告别面板
-            goodbye = LobsterASCII.HAPPY
+            goodbye = self.avatar.get_art('happy')
             self.console.print()
             self.console.print(Panel(
                 f"""{goodbye}

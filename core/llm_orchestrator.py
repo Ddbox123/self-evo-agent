@@ -39,14 +39,34 @@ if sys.platform == 'win32':
 # 配置定义
 # ============================================================================
 
+
+def _load_llm_defaults() -> dict:
+    """从配置加载默认常量"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        return {
+            "model_name": cfg.llm.model_name,
+            "temperature": cfg.llm.temperature,
+            "api_timeout": cfg.llm.api_timeout,
+            "connect_timeout": cfg.llm.connect_timeout,
+        }
+    except Exception:
+        return {}
+
+
+_llm_defaults = _load_llm_defaults()
+
+
 @dataclass
 class LLMConfig:
     """LLM 配置"""
-    model_name: str = "gpt-4o"
-    temperature: float = 0.7
+    model_name: str = _llm_defaults.get("model_name", "gpt-4o")
+    temperature: float = _llm_defaults.get("temperature", 0.7)
     api_key: Optional[str] = None
     api_base: Optional[str] = None
-    api_timeout: int = 600
+    api_timeout: int = _llm_defaults.get("api_timeout", 600)
+    connect_timeout: int = _llm_defaults.get("connect_timeout", 30)
     max_tokens: Optional[int] = None
 
 
@@ -135,7 +155,7 @@ class LLMOrchestrator:
                 model_name=cfg.llm.model_name,
                 temperature=cfg.llm.temperature,
                 api_key=cfg.get_api_key(),
-                api_base=getattr(cfg.llm, 'api_base', None),
+                api_base=cfg.effective_api_base,
                 api_timeout=getattr(cfg.llm, 'api_timeout', 600),
             )
         except Exception:
@@ -146,29 +166,32 @@ class LLMOrchestrator:
         if self._llm is not None:
             return
 
+        # 获取实际 API 端点（provider=local 时使用 llm_local.url）
+        api_base = self.config.effective_api_base
+
         llm_kwargs = {
             "model": self.config.model_name,
             "temperature": self.config.temperature,
             "api_key": self.config.api_key,
         }
-        if self.config.api_base:
-            llm_kwargs["base_url"] = self.config.api_base
+        if api_base:
+            llm_kwargs["base_url"] = api_base
         if self.config.max_tokens:
             llm_kwargs["max_tokens"] = self.config.max_tokens
 
-        llm_kwargs["timeout"] = httpx.Timeout(self.config.api_timeout, connect=30)
+        llm_kwargs["timeout"] = httpx.Timeout(self.config.api_timeout, connect=self.config.connect_timeout)
 
         self._llm = ChatOpenAI(**llm_kwargs)
 
         # 创建压缩用 LLM
         compression_kwargs = {
             "model": self.config.model_name,
-            "temperature": 0.3,
+            "temperature": 0.3,  # 压缩用模型温度固定为 0.3
             "api_key": self.config.api_key,
         }
-        if self.config.api_base:
-            compression_kwargs["base_url"] = self.config.api_base
-        compression_kwargs["timeout"] = httpx.Timeout(self.config.api_timeout, connect=30)
+        if api_base:
+            compression_kwargs["base_url"] = api_base
+        compression_kwargs["timeout"] = httpx.Timeout(self.config.api_timeout, connect=self.config.connect_timeout)
 
         self._compression_llm = ChatOpenAI(**compression_kwargs)
 
